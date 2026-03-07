@@ -1,0 +1,3 @@
+[deploy]
+startCommand = "python main.py remind"
+cronSchedule = "0 8 * * *"

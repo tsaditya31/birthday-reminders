@@ -1,0 +1,112 @@
+"""
+Reminder engine — checks upcoming birthdays and dispatches Telegram notifications.
+Respects per-year notification flags to avoid duplicate sends.
+"""
+
+import logging
+from datetime import date, timedelta
+
+from db.store import get_upcoming_birthdays, mark_notified, reset_annual_flags
+from core.amazon_helper import build_amazon_message
+from notifier.telegram_notifier import send_message
+
+logger = logging.getLogger(__name__)
+
+
+def _days_until(month: int, day: int) -> int:
+    today = date.today()
+    this_year = today.year
+    target = date(this_year, month, day)
+    if target < today:
+        target = date(this_year + 1, month, day)
+    return (target - today).days
+
+
+def _compute_current_age(birth_year: int | None, birth_month: int, birth_day: int) -> int | None:
+    if birth_year is None:
+        return None
+    today = date.today()
+    # Have they had their birthday yet this year?
+    had_birthday_this_year = (today.month, today.day) >= (birth_month, birth_day)
+    return today.year - birth_year - (0 if had_birthday_this_year else 1) + 1
+    # +1 because we want the age they're *turning*
+
+
+def _format_basic_reminder(name: str, classification: str, days_until: int, age: int | None) -> str:
+    if days_until == 0:
+        timing = "is <b>today</b> 🎉"
+    elif days_until == 1:
+        timing = "is <b>tomorrow</b>!"
+    else:
+        timing = f"is in <b>{days_until} days</b>"
+
+    emoji = {"annas_friend": "🧒", "family": "👨‍👩‍👧", "friend": "🎂"}.get(classification, "🎂")
+    age_str = f" (turning {age})" if age else ""
+    return f"{emoji} <b>{name}</b>'s birthday{age_str} {timing}"
+
+
+def run_reminders(dry_run: bool = False):
+    """Main daily reminder logic."""
+    today = date.today()
+
+    # Reset notification flags on Jan 1
+    if today.month == 1 and today.day == 1:
+        logger.info("New year detected — resetting notification flags.")
+        if not dry_run:
+            reset_annual_flags()
+
+    upcoming = get_upcoming_birthdays(days_ahead=14)
+    logger.info("Found %d birthdays in the next 14 days.", len(upcoming))
+
+    sent_count = 0
+
+    for row in upcoming:
+        bid = row["id"]
+        name = row["name"]
+        classification = row["classification"]
+        birth_month = row["birth_month"]
+        birth_day = row["birth_day"]
+        birth_year = row["birth_year"]
+
+        days = _days_until(birth_month, birth_day)
+        age = _compute_current_age(birth_year, birth_month, birth_day)
+
+        logger.info("%s: %d days away (classification=%s)", name, days, classification)
+
+        # ── Today ────────────────────────────────────────────────────────────
+        if days == 0 and not row["notified_day"]:
+            msg = _format_basic_reminder(name, classification, 0, age)
+            if classification == "annas_friend":
+                msg += "\n\n" + build_amazon_message(name, age, 0)
+            if not dry_run:
+                send_message(msg)
+                mark_notified(bid, "day")
+            else:
+                logger.info("[DRY RUN] Would send (day): %s", msg)
+            sent_count += 1
+
+        # ── 7 days ───────────────────────────────────────────────────────────
+        elif days == 7 and not row["notified_1wk"]:
+            msg = _format_basic_reminder(name, classification, 7, age)
+            if not dry_run:
+                send_message(msg)
+                mark_notified(bid, "1wk")
+            else:
+                logger.info("[DRY RUN] Would send (1wk): %s", msg)
+            sent_count += 1
+
+        # ── 14 days ──────────────────────────────────────────────────────────
+        elif days == 14 and not row["notified_2wk"]:
+            if classification == "annas_friend":
+                msg = build_amazon_message(name, age, 14)
+            else:
+                msg = _format_basic_reminder(name, classification, 14, age)
+            if not dry_run:
+                send_message(msg)
+                mark_notified(bid, "2wk")
+            else:
+                logger.info("[DRY RUN] Would send (2wk): %s", msg)
+            sent_count += 1
+
+    logger.info("Reminders sent: %d", sent_count)
+    return sent_count
