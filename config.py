@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     gmail_client_secret: str
     gmail_refresh_token: str
 
-    database_path: str = "birthdays.db"
+    database_url: str
 
 
 settings = Settings()
