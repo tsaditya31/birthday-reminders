@@ -30,6 +30,20 @@ SEARCH_QUERIES = [
     '"Birthday of"',
 ]
 
+ACTION_QUERIES = [
+    "subject:appointment",
+    "subject:reminder",
+    '"your appointment"',
+    '"RSVP by"',
+    '"deadline"',
+    '"due by"',
+    '"respond by"',
+    '"action required"',
+    "urgent",
+    '"please respond"',
+    '"time sensitive"',
+]
+
 
 @dataclass
 class RawEmail:
@@ -57,6 +71,11 @@ def _build_service():
 def _after_date() -> str:
     two_years_ago = date.today() - timedelta(days=730)
     return two_years_ago.strftime("%Y/%m/%d")
+
+
+def _after_date_days_back(days_back: int) -> str:
+    cutoff = date.today() - timedelta(days=days_back)
+    return cutoff.strftime("%Y/%m/%d")
 
 
 def _decode_body(payload: dict) -> str:
@@ -159,4 +178,64 @@ def crawl_emails(max_per_query: int = 200) -> list[RawEmail]:
                 break
 
     logger.info("Crawl complete. %d new emails fetched.", len(results))
+    return results
+
+
+def crawl_action_emails(days_back: int = 3, max_per_query: int = 50) -> list[RawEmail]:
+    """
+    Search Gmail for action-related emails from the last days_back days.
+    Skips already-processed messages. Returns new RawEmail objects.
+    """
+    service = _build_service()
+    after = _after_date_days_back(days_back)
+    seen_ids: set[str] = set()
+    results: list[RawEmail] = []
+
+    for query in ACTION_QUERIES:
+        full_query = f"{query} after:{after}"
+        logger.info("Running action Gmail query: %s", full_query)
+
+        page_token: Optional[str] = None
+        fetched = 0
+
+        while fetched < max_per_query:
+            params = {
+                "userId": "me",
+                "q": full_query,
+                "maxResults": min(100, max_per_query - fetched),
+            }
+            if page_token:
+                params["pageToken"] = page_token
+
+            try:
+                response = service.users().messages().list(**params).execute()
+            except Exception as exc:
+                logger.error("Gmail list failed for query '%s': %s", query, exc)
+                break
+
+            messages = response.get("messages", [])
+            if not messages:
+                break
+
+            for msg_ref in messages:
+                msg_id = msg_ref["id"]
+                if msg_id in seen_ids:
+                    continue
+                seen_ids.add(msg_id)
+
+                if is_email_processed(msg_id):
+                    logger.debug("Skipping already-processed message %s", msg_id)
+                    continue
+
+                raw = _fetch_message(service, msg_id)
+                if raw:
+                    results.append(raw)
+                    mark_email_processed(msg_id)
+
+            fetched += len(messages)
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+    logger.info("Action crawl complete. %d new emails fetched.", len(results))
     return results

@@ -12,6 +12,9 @@ from notifier.telegram_notifier import send_message
 
 logger = logging.getLogger(__name__)
 
+# Each alert tuple: (message_str, birthday_id, flag)
+BirthdayAlert = tuple[str, int, str]
+
 
 def _days_until(month: int, day: int) -> int:
     today = date.today()
@@ -45,20 +48,21 @@ def _format_basic_reminder(name: str, classification: str, days_until: int, age:
     return f"{emoji} <b>{name}</b>'s birthday{age_str} {timing}"
 
 
-def run_reminders(dry_run: bool = False):
-    """Main daily reminder logic."""
+def get_birthday_alerts() -> list[BirthdayAlert]:
+    """
+    Collect birthday alerts that are due to be sent today.
+    Returns a list of (message_str, birthday_id, flag) tuples — does NOT send or mark.
+    """
     today = date.today()
 
-    # Reset notification flags on Jan 1
     if today.month == 1 and today.day == 1:
         logger.info("New year detected — resetting notification flags.")
-        if not dry_run:
-            reset_annual_flags()
+        reset_annual_flags()
 
     upcoming = get_upcoming_birthdays(days_ahead=14)
     logger.info("Found %d birthdays in the next 14 days.", len(upcoming))
 
-    sent_count = 0
+    alerts: list[BirthdayAlert] = []
 
     for row in upcoming:
         bid = row["id"]
@@ -73,40 +77,38 @@ def run_reminders(dry_run: bool = False):
 
         logger.info("%s: %d days away (classification=%s)", name, days, classification)
 
-        # ── Today ────────────────────────────────────────────────────────────
         if days == 0 and not row["notified_day"]:
             msg = _format_basic_reminder(name, classification, 0, age)
             if classification == "annas_friend":
                 msg += "\n\n" + build_amazon_message(name, age, 0)
-            if not dry_run:
-                send_message(msg)
-                mark_notified(bid, "day")
-            else:
-                logger.info("[DRY RUN] Would send (day): %s", msg)
-            sent_count += 1
+            alerts.append((msg, bid, "day"))
 
-        # ── 7 days ───────────────────────────────────────────────────────────
         elif days == 7 and not row["notified_1wk"]:
             msg = _format_basic_reminder(name, classification, 7, age)
-            if not dry_run:
-                send_message(msg)
-                mark_notified(bid, "1wk")
-            else:
-                logger.info("[DRY RUN] Would send (1wk): %s", msg)
-            sent_count += 1
+            alerts.append((msg, bid, "1wk"))
 
-        # ── 14 days ──────────────────────────────────────────────────────────
         elif days == 14 and not row["notified_2wk"]:
             if classification == "annas_friend":
                 msg = build_amazon_message(name, age, 14)
             else:
                 msg = _format_basic_reminder(name, classification, 14, age)
-            if not dry_run:
-                send_message(msg)
-                mark_notified(bid, "2wk")
-            else:
-                logger.info("[DRY RUN] Would send (2wk): %s", msg)
-            sent_count += 1
+            alerts.append((msg, bid, "2wk"))
+
+    return alerts
+
+
+def run_reminders(dry_run: bool = False):
+    """Main daily reminder logic (standalone — sends directly)."""
+    alerts = get_birthday_alerts()
+    sent_count = 0
+
+    for msg, bid, flag in alerts:
+        if not dry_run:
+            send_message(msg)
+            mark_notified(bid, flag)
+        else:
+            logger.info("[DRY RUN] Would send (%s): %s", flag, msg)
+        sent_count += 1
 
     logger.info("Reminders sent: %d", sent_count)
     return sent_count

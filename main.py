@@ -1,10 +1,10 @@
 """
-Birthday Reminders Agent
+Personal Email Intelligence Agent
 
 Usage:
-  python main.py crawl    # Crawl Gmail, extract birthdays, populate DB
-  python main.py remind   # Check upcoming birthdays, send Telegram notifications
-  python main.py remind --dry-run  # Simulate notifications without sending
+  python main.py crawl           # Crawl Gmail for birthdays, populate DB (2-year lookback)
+  python main.py remind          # Build & send daily digest (birthdays + action items)
+  python main.py remind --dry-run  # Simulate digest without sending
 """
 
 import argparse
@@ -14,7 +14,8 @@ import sys
 from db.store import init_db, upsert_birthday
 from crawler.gmail_crawler import crawl_emails
 from core.birthday_extractor import extract_birthdays
-from core.reminder_engine import run_reminders
+from core.digest_engine import build_daily_digest
+from notifier.telegram_notifier import send_message
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 def cmd_crawl():
-    logger.info("=== Starting Gmail crawl ===")
+    """Crawl Gmail for birthday emails (2-year lookback), extract and store birthdays."""
+    logger.info("=== Starting Gmail birthday crawl ===")
     init_db()
 
     emails = crawl_emails()
@@ -53,23 +55,34 @@ def cmd_crawl():
 
 
 def cmd_remind(dry_run: bool = False):
-    logger.info("=== Running reminder check (dry_run=%s) ===", dry_run)
+    """Build the daily digest (action items + birthdays) and send via Telegram."""
+    logger.info("=== Building daily digest (dry_run=%s) ===", dry_run)
     init_db()
-    count = run_reminders(dry_run=dry_run)
-    logger.info("=== Reminder run complete. %d notifications dispatched. ===", count)
+
+    digest = build_daily_digest(dry_run=dry_run)
+    if digest:
+        if not dry_run:
+            send_message(digest)
+            logger.info("=== Digest sent. ===")
+        else:
+            logger.info("[DRY RUN]\n%s", digest)
+    else:
+        logger.info("Nothing actionable today. No message sent.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Birthday Reminders Agent")
+    parser = argparse.ArgumentParser(description="Personal Email Intelligence Agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("crawl", help="Crawl Gmail and extract birthdays")
+    subparsers.add_parser("crawl", help="Crawl Gmail and extract birthdays (2-year lookback)")
 
-    remind_parser = subparsers.add_parser("remind", help="Send upcoming birthday reminders")
+    remind_parser = subparsers.add_parser(
+        "remind", help="Build and send daily digest (action items + birthdays)"
+    )
     remind_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Log notifications without actually sending them",
+        help="Log digest to console without sending to Telegram",
     )
 
     args = parser.parse_args()

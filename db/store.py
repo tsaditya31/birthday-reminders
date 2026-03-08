@@ -45,6 +45,22 @@ def init_db():
                 message_id  TEXT PRIMARY KEY,
                 processed_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS action_items (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                type             TEXT NOT NULL,
+                title            TEXT NOT NULL,
+                description      TEXT,
+                due_date         TEXT,
+                due_time         TEXT,
+                email_message_id TEXT,
+                email_subject    TEXT,
+                email_from       TEXT,
+                notified_early   INTEGER DEFAULT 0,
+                notified_day     INTEGER DEFAULT 0,
+                created_at       TEXT,
+                updated_at       TEXT
+            );
         """)
 
 
@@ -120,6 +136,85 @@ def reset_annual_flags():
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         conn.execute("UPDATE birthdays SET notified_2wk=0, notified_1wk=0, notified_day=0, updated_at=?", (now,))
+
+
+# ── Action-item helpers ───────────────────────────────────────────────────────
+
+def upsert_action_item(
+    type: str,
+    title: str,
+    email_message_id: str,
+    description: Optional[str] = None,
+    due_date: Optional[str] = None,
+    due_time: Optional[str] = None,
+    email_subject: Optional[str] = None,
+    email_from: Optional[str] = None,
+) -> int:
+    """Insert or update an action item. Dedup on (email_message_id, type)."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT id FROM action_items WHERE email_message_id = ? AND type = ?",
+            (email_message_id, type),
+        ).fetchone()
+
+        if existing:
+            conn.execute(
+                """UPDATE action_items SET
+                    title = ?,
+                    description = COALESCE(?, description),
+                    due_date = COALESCE(?, due_date),
+                    due_time = COALESCE(?, due_time),
+                    updated_at = ?
+                WHERE id = ?""",
+                (title, description, due_date, due_time, now, existing["id"]),
+            )
+            return existing["id"]
+        else:
+            cur = conn.execute(
+                """INSERT INTO action_items
+                    (type, title, description, due_date, due_time,
+                     email_message_id, email_subject, email_from, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (type, title, description, due_date, due_time,
+                 email_message_id, email_subject, email_from, now, now),
+            )
+            return cur.lastrowid
+
+
+def get_upcoming_action_items(days_ahead: int = 3) -> list[sqlite3.Row]:
+    """Return action items with due_date within the next days_ahead days."""
+    from datetime import date, timedelta
+
+    today = date.today()
+    date_max = today + timedelta(days=days_ahead)
+    with get_db() as conn:
+        return conn.execute(
+            """SELECT * FROM action_items
+               WHERE due_date IS NOT NULL
+                 AND due_date >= ?
+                 AND due_date <= ?""",
+            (today.isoformat(), date_max.isoformat()),
+        ).fetchall()
+
+
+def get_unnotified_urgent() -> list[sqlite3.Row]:
+    """Return urgent_reply items that have not yet been notified."""
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT * FROM action_items WHERE type = 'urgent_reply' AND notified_day = 0"
+        ).fetchall()
+
+
+def mark_action_notified(item_id: int, flag: str):
+    """flag: 'early' | 'day'"""
+    col = {"early": "notified_early", "day": "notified_day"}[flag]
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        conn.execute(
+            f"UPDATE action_items SET {col} = 1, updated_at = ? WHERE id = ?",
+            (now, item_id),
+        )
 
 
 # ── Processed-email helpers ───────────────────────────────────────────────────
