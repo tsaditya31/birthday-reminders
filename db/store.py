@@ -34,6 +34,7 @@ def init_db():
                     classification      TEXT NOT NULL,
                     email_source        TEXT,
                     age_at_extraction   INTEGER,
+                    dismissed           BOOLEAN DEFAULT FALSE,
                     notified_2wk        INTEGER DEFAULT 0,
                     notified_1wk        INTEGER DEFAULT 0,
                     notified_day        INTEGER DEFAULT 0,
@@ -48,6 +49,17 @@ def init_db():
                 )
             """)
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    id          SERIAL PRIMARY KEY,
+                    category    TEXT NOT NULL,
+                    rule_text   TEXT NOT NULL,
+                    source_msg  TEXT,
+                    active      BOOLEAN DEFAULT TRUE,
+                    created_at  TEXT,
+                    updated_at  TEXT
+                )
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS action_items (
                     id               SERIAL PRIMARY KEY,
                     type             TEXT NOT NULL,
@@ -58,6 +70,7 @@ def init_db():
                     email_message_id TEXT,
                     email_subject    TEXT,
                     email_from       TEXT,
+                    dismissed        BOOLEAN DEFAULT FALSE,
                     notified_early   INTEGER DEFAULT 0,
                     notified_day     INTEGER DEFAULT 0,
                     created_at       TEXT,
@@ -122,7 +135,7 @@ def get_upcoming_birthdays(days_ahead: int = 14) -> list[dict]:
 
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM birthdays")
+            cur.execute("SELECT * FROM birthdays WHERE dismissed = FALSE")
             rows = cur.fetchall()
 
     return [row for row in rows if (row["birth_month"], row["birth_day"]) in month_days]
@@ -204,14 +217,20 @@ def get_upcoming_action_items(days_ahead: int = 3) -> list[dict]:
 
     today = date.today()
     date_max = today + timedelta(days=days_ahead)
+    return get_action_items_between(today.isoformat(), date_max.isoformat())
+
+
+def get_action_items_between(start_date: str, end_date: str) -> list[dict]:
+    """Return action items with due_date between start_date and end_date (inclusive)."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT * FROM action_items
                    WHERE due_date IS NOT NULL
                      AND due_date >= %s
-                     AND due_date <= %s""",
-                (today.isoformat(), date_max.isoformat()),
+                     AND due_date <= %s
+                     AND dismissed = FALSE""",
+                (start_date, end_date),
             )
             return cur.fetchall()
 
@@ -221,7 +240,7 @@ def get_unnotified_urgent() -> list[dict]:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT * FROM action_items WHERE type = 'urgent_reply' AND notified_day = 0"
+                "SELECT * FROM action_items WHERE type = 'urgent_reply' AND notified_day = 0 AND dismissed = FALSE"
             )
             return cur.fetchall()
 
@@ -257,3 +276,82 @@ def mark_email_processed(message_id: str):
                 "INSERT INTO processed_emails (message_id, processed_at) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (message_id, now),
             )
+
+
+# ── Preference helpers ───────────────────────────────────────────────────────
+
+def add_preference(category: str, rule_text: str, source_msg: Optional[str] = None) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO user_preferences (category, rule_text, source_msg, created_at, updated_at)
+                   VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+                (category, rule_text, source_msg, now, now),
+            )
+            return cur.fetchone()["id"]
+
+
+def get_active_preferences(category: Optional[str] = None) -> list[dict]:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if category:
+                cur.execute(
+                    "SELECT * FROM user_preferences WHERE active = TRUE AND category = %s ORDER BY created_at",
+                    (category,),
+                )
+            else:
+                cur.execute("SELECT * FROM user_preferences WHERE active = TRUE ORDER BY created_at")
+            return cur.fetchall()
+
+
+def deactivate_preference(pref_id: int):
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE user_preferences SET active = FALSE, updated_at = %s WHERE id = %s",
+                (now, pref_id),
+            )
+
+
+# ── Dismiss helpers ──────────────────────────────────────────────────────────
+
+def dismiss_birthday(birthday_id: int):
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE birthdays SET dismissed = TRUE, updated_at = %s WHERE id = %s",
+                (now, birthday_id),
+            )
+
+
+def dismiss_action_item(item_id: int):
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE action_items SET dismissed = TRUE, updated_at = %s WHERE id = %s",
+                (now, item_id),
+            )
+
+
+def find_birthday_by_name(name: str) -> Optional[dict]:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM birthdays WHERE LOWER(name) LIKE %s AND dismissed = FALSE ORDER BY id LIMIT 1",
+                (f"%{name.lower()}%",),
+            )
+            return cur.fetchone()
+
+
+def find_action_item_by_title(title: str) -> Optional[dict]:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM action_items WHERE LOWER(title) LIKE %s AND dismissed = FALSE ORDER BY id LIMIT 1",
+                (f"%{title.lower()}%",),
+            )
+            return cur.fetchone()

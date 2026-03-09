@@ -79,13 +79,16 @@ def _format_emails_for_prompt(batch: list[RawEmail]) -> str:
 
 
 def _call_claude(batch: list[RawEmail]) -> list[dict]:
+    from core.preferences import get_extraction_rules_block
+
     emails_text = _format_emails_for_prompt(batch)
     prompt = USER_PROMPT_TEMPLATE.format(n=len(batch), emails=emails_text)
 
+    system = SYSTEM_PROMPT + get_extraction_rules_block()
     message = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4096,
-        system=SYSTEM_PROMPT,
+        system=system,
         messages=[{"role": "user", "content": prompt}],
     )
 

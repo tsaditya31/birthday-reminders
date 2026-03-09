@@ -15,6 +15,7 @@ import sys
 from db.store import init_db, upsert_birthday
 from crawler.gmail_crawler import crawl_emails
 from core.birthday_extractor import extract_birthdays
+from core.preferences import get_blocked_senders
 from core.digest_engine import build_daily_digest
 from notifier.telegram_notifier import send_message
 from notifier.telegram_bot import run_polling_loop
@@ -36,6 +37,18 @@ def cmd_crawl():
     if not emails:
         logger.info("No new emails to process.")
         return
+
+    # Filter out emails from blocked senders
+    blocked = get_blocked_senders()
+    if blocked:
+        before = len(emails)
+        emails = [
+            e for e in emails
+            if not any(b in e.sender.lower() for b in blocked)
+        ]
+        filtered = before - len(emails)
+        if filtered:
+            logger.info("Filtered out %d emails from blocked senders.", filtered)
 
     logger.info("Extracting birthdays from %d emails...", len(emails))
     birthdays = extract_birthdays(emails)
