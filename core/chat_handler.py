@@ -5,6 +5,7 @@ Chat handler — parses user intent via Claude and queries the DB to build a res
 import json
 import logging
 import random
+from collections import deque
 from datetime import date, timedelta
 from html import escape
 
@@ -28,15 +29,21 @@ logger = logging.getLogger(__name__)
 
 client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
+# Rolling conversation history for context (user msg + assistant JSON response)
+_history: deque[dict] = deque(maxlen=10)
+
 SYSTEM_PROMPT = (
     "You are a personal assistant. Parse the user's message and return JSON with intent and parameters.\n"
+    "You may see prior conversation messages for context. Use them to resolve references like "
+    "\"expand that\", \"show me the whole month\", \"more details\", etc.\n\n"
     "Supported intents:\n"
     "  action_items, birthdays, help, unknown,\n"
     "  delete_birthday, dismiss_action_item, add_preference, list_preferences\n\n"
     "For action_items and birthdays, return EITHER:\n"
     '  - "days_ahead": <int> for relative queries like "this week", "next 30 days"\n'
     '  - "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD" for specific periods '
-    'like "in March", "next month", "in April 2026"\n\n'
+    'like "in March", "next month", "in April 2026"\n'
+    "Prefer start_date/end_date over days_ahead when the user mentions a specific month or period.\n\n"
     'For delete_birthday: {"intent": "delete_birthday", "name": "<person name>"}\n'
     'For dismiss_action_item: {"intent": "dismiss_action_item", "title": "<search term>"}\n'
     'For add_preference: {"intent": "add_preference", "category": "extraction_rule"|"sender_filter", '
@@ -58,11 +65,12 @@ SYSTEM_PROMPT = (
 
 
 def _parse_intent(user_message: str) -> dict:
+    messages = list(_history) + [{"role": "user", "content": user_message}]
     message = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=256,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
+        messages=messages,
     )
     raw = message.content[0].text.strip()
     if raw.startswith("```"):
@@ -70,10 +78,15 @@ def _parse_intent(user_message: str) -> dict:
         if raw.startswith("json"):
             raw = raw[4:]
     try:
-        return json.loads(raw.strip())
+        parsed = json.loads(raw.strip())
     except json.JSONDecodeError:
         logger.warning("Claude returned non-JSON intent: %s", raw[:200])
-        return {"intent": "unknown"}
+        parsed = {"intent": "unknown"}
+
+    # Record the exchange so follow-ups have context
+    _history.append({"role": "user", "content": user_message})
+    _history.append({"role": "assistant", "content": raw.strip()})
+    return parsed
 
 
 def _birthday_in_range(birth_month: int, birth_day: int, start: date, end: date) -> bool:
