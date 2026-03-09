@@ -3,6 +3,8 @@ Reminder engine — checks upcoming birthdays and dispatches Telegram notificati
 Respects per-year notification flags to avoid duplicate sends.
 """
 
+from __future__ import annotations
+
 import logging
 from datetime import date, timedelta
 

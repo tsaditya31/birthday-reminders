@@ -28,6 +28,17 @@ def send_message(text: str, parse_mode: str = "HTML") -> bool:
         return True
     except httpx.HTTPStatusError as exc:
         logger.error("Telegram API error: %s — %s", exc.response.status_code, exc.response.text)
+        # Retry without HTML parse mode if the markup was rejected
+        if exc.response.status_code == 400 and parse_mode:
+            logger.info("Retrying without parse_mode...")
+            payload.pop("parse_mode", None)
+            try:
+                response = httpx.post(url, json=payload, timeout=15)
+                response.raise_for_status()
+                logger.info("Telegram message sent (plain text fallback).")
+                return True
+            except Exception as retry_exc:
+                logger.error("Plain text retry also failed: %s", retry_exc)
     except Exception as exc:
         logger.error("Telegram send failed: %s", exc)
     return False

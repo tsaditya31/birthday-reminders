@@ -5,6 +5,7 @@ Chat handler — parses user intent via Claude and queries the DB to build a res
 import json
 import logging
 from datetime import date
+from html import escape
 
 import anthropic
 
@@ -49,9 +50,11 @@ def _format_action_items(items: list[dict]) -> str:
     for item in items:
         due = item.get("due_date") or "no date"
         time_part = f" {item['due_time']}" if item.get("due_time") else ""
-        lines.append(f"• <b>{item['title']}</b> [{item['type']}] — {due}{time_part}")
+        title = escape(item["title"])
+        item_type = escape(item["type"])
+        lines.append(f"• <b>{title}</b> [{item_type}] — {due}{time_part}")
         if item.get("description"):
-            lines.append(f"  <i>{item['description']}</i>")
+            lines.append(f"  <i>{escape(item['description'])}</i>")
     return "\n".join(lines)
 
 
@@ -83,7 +86,7 @@ def _format_birthdays(items: list[dict]) -> str:
             when = f"in {delta} days"
 
         year_info = f", turning {today.year - b['birth_year']}" if b.get("birth_year") else ""
-        lines.append(f"• <b>{b['name']}</b> — {month}/{day} ({when}{year_info})")
+        lines.append(f"• <b>{escape(b['name'])}</b> — {month}/{day} ({when}{year_info})")
     return "\n".join(lines)
 
 
@@ -118,6 +121,6 @@ def handle_message(user_message: str) -> str:
         return _HELP_TEXT
 
     return (
-        "Sorry, I didn't understand that. Try asking about your action items or upcoming birthdays. "
-        "Send <i>help</i> for examples."
+        "Sorry, I didn\u2019t understand that. Try asking about your action items or upcoming birthdays. "
+        "Send /help for examples."
     )
