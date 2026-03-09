@@ -12,8 +12,9 @@ import argparse
 import logging
 import sys
 
-from db.store import init_db, upsert_birthday
-from crawler.gmail_crawler import crawl_emails
+from db.store import init_db, upsert_action_item, upsert_birthday
+from crawler.gmail_crawler import crawl_action_emails, crawl_emails
+from core.action_extractor import extract_action_items
 from core.birthday_extractor import extract_birthdays
 from core.preferences import get_blocked_senders
 from core.digest_engine import build_daily_digest
@@ -28,45 +29,70 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _filter_blocked(emails, blocked):
+    """Remove emails from blocked senders."""
+    if not blocked:
+        return emails
+    before = len(emails)
+    emails = [e for e in emails if not any(b in e.sender.lower() for b in blocked)]
+    filtered = before - len(emails)
+    if filtered:
+        logger.info("Filtered out %d emails from blocked senders.", filtered)
+    return emails
+
+
 def cmd_crawl():
-    """Crawl Gmail for birthday emails (2-year lookback), extract and store birthdays."""
-    logger.info("=== Starting Gmail birthday crawl ===")
+    """Crawl Gmail for birthday + action-item emails, extract and store."""
+    logger.info("=== Starting Gmail crawl ===")
     init_db()
-
-    emails = crawl_emails()
-    if not emails:
-        logger.info("No new emails to process.")
-        return
-
-    # Filter out emails from blocked senders
     blocked = get_blocked_senders()
-    if blocked:
-        before = len(emails)
-        emails = [
-            e for e in emails
-            if not any(b in e.sender.lower() for b in blocked)
-        ]
-        filtered = before - len(emails)
-        if filtered:
-            logger.info("Filtered out %d emails from blocked senders.", filtered)
 
-    logger.info("Extracting birthdays from %d emails...", len(emails))
-    birthdays = extract_birthdays(emails)
+    # ── Birthdays (2-year lookback) ──────────────────────────────────────────
+    birthday_emails = crawl_emails()
+    if birthday_emails:
+        birthday_emails = _filter_blocked(birthday_emails, blocked)
+        logger.info("Extracting birthdays from %d emails...", len(birthday_emails))
+        birthdays = extract_birthdays(birthday_emails)
+        saved = 0
+        for b in birthdays:
+            upsert_birthday(
+                name=b.name,
+                birth_month=b.birth_month,
+                birth_day=b.birth_day,
+                classification=b.classification,
+                birth_year=b.birth_year,
+                email_source=b.email_source,
+                age_at_extraction=b.age_at_event,
+            )
+            saved += 1
+        logger.info("%d birthdays saved/updated.", saved)
+    else:
+        logger.info("No new birthday emails to process.")
 
-    saved = 0
-    for b in birthdays:
-        upsert_birthday(
-            name=b.name,
-            birth_month=b.birth_month,
-            birth_day=b.birth_day,
-            classification=b.classification,
-            birth_year=b.birth_year,
-            email_source=b.email_source,
-            age_at_extraction=b.age_at_event,
-        )
-        saved += 1
+    # ── Action items (60-day lookback) ───────────────────────────────────────
+    action_emails = crawl_action_emails(days_back=60, max_per_query=200)
+    if action_emails:
+        action_emails = _filter_blocked(action_emails, blocked)
+        logger.info("Extracting action items from %d emails...", len(action_emails))
+        actions = extract_action_items(action_emails)
+        saved = 0
+        for item in actions:
+            upsert_action_item(
+                type=item.type,
+                title=item.title,
+                email_message_id=item.email_message_id,
+                description=item.description,
+                due_date=item.due_date,
+                due_time=item.due_time,
+                email_subject=item.email_subject,
+                email_from=item.email_from,
+            )
+            saved += 1
+        logger.info("%d action items saved/updated.", saved)
+    else:
+        logger.info("No new action emails to process.")
 
-    logger.info("=== Crawl complete. %d birthdays saved/updated. ===", saved)
+    logger.info("=== Crawl complete. ===")
 
 
 def cmd_bot():

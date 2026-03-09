@@ -74,7 +74,7 @@ def build_daily_digest(dry_run: bool = False) -> Optional[str]:
 
     # ── Step 1: Crawl and extract new action emails ──────────────────────────
     logger.info("Crawling action emails…")
-    raw_emails = crawl_action_emails(days_back=3)
+    raw_emails = crawl_action_emails(days_back=14)
     if raw_emails:
         logger.info("Extracting action items from %d emails…", len(raw_emails))
         action_items = extract_action_items(raw_emails)
