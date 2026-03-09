@@ -34,8 +34,20 @@ def _get_updates(offset: int) -> list[dict]:
         return []
 
 
+def _delete_webhook():
+    """Remove any existing webhook so getUpdates (long-polling) works."""
+    url = f"{_BASE}/deleteWebhook"
+    try:
+        resp = httpx.post(url, timeout=10)
+        resp.raise_for_status()
+        logger.info("deleteWebhook: %s", resp.json())
+    except Exception as exc:
+        logger.warning("deleteWebhook failed: %s", exc)
+
+
 def run_polling_loop():
     """Block forever, polling Telegram for new messages and replying."""
+    _delete_webhook()
     logger.info("Telegram bot polling started (chat_id=%s)", settings.telegram_chat_id)
     offset = 0
 
