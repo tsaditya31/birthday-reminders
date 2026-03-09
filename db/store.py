@@ -21,6 +21,15 @@ def get_db():
         conn.close()
 
 
+def _add_column_if_missing(cur, table: str, column: str, col_type: str):
+    cur.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = %s",
+        (table, column),
+    )
+    if not cur.fetchone():
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+
 def init_db():
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -77,6 +86,10 @@ def init_db():
                     updated_at       TEXT
                 )
             """)
+
+            # Migrations for existing tables
+            _add_column_if_missing(cur, "birthdays", "dismissed", "BOOLEAN DEFAULT FALSE")
+            _add_column_if_missing(cur, "action_items", "dismissed", "BOOLEAN DEFAULT FALSE")
 
 
 # ── Birthday helpers ──────────────────────────────────────────────────────────
