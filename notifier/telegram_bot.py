@@ -24,7 +24,7 @@ def _get_updates(offset: int) -> list[dict]:
     try:
         resp = httpx.get(
             url,
-            params={"offset": offset, "timeout": _TIMEOUT, "allowed_updates": ["message"]},
+            params={"offset": offset, "timeout": _TIMEOUT},
             timeout=_TIMEOUT + 5,
         )
         resp.raise_for_status()
