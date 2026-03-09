@@ -2,6 +2,7 @@
 Chat handler — parses user intent via Claude and queries the DB to build a response.
 """
 
+import calendar
 import json
 import logging
 import random
@@ -32,13 +33,32 @@ client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 # Rolling conversation history for context (user msg + assistant JSON response)
 _history: deque[dict] = deque(maxlen=10)
 
+# Track the last query range so "expand" / "show more" can widen it
+_last_query: dict = {}  # {"intent": ..., "start_date": ..., "end_date": ...}
+
+
+def _end_of_month(d: date) -> date:
+    """Return the last day of the month for a given date."""
+    return d.replace(day=calendar.monthrange(d.year, d.month)[1])
+
+
+def _next_month_end(d: date) -> date:
+    """Return the last day of the month after the given date."""
+    if d.month == 12:
+        return date(d.year + 1, 1, 31)
+    nm = d.month + 1
+    return date(d.year, nm, calendar.monthrange(d.year, nm)[1])
+
+
 SYSTEM_PROMPT = (
     "You are a personal assistant. Parse the user's message and return JSON with intent and parameters.\n"
     "You may see prior conversation messages for context. Use them to resolve references like "
     "\"expand that\", \"show me the whole month\", \"more details\", etc.\n\n"
     "Supported intents:\n"
-    "  action_items, birthdays, help, unknown,\n"
+    "  action_items, birthdays, expand, help, unknown,\n"
     "  delete_birthday, dismiss_action_item, add_preference, list_preferences\n\n"
+    'Use "expand" when the user wants to see MORE of what was just shown — e.g. "expand", '
+    '"show more", "show the whole month", "what about next month too", "wider range".\n\n'
     "For action_items and birthdays, return EITHER:\n"
     '  - "days_ahead": <int> for relative queries like "this week", "next 30 days"\n'
     '  - "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD" for specific periods '
@@ -60,7 +80,9 @@ SYSTEM_PROMPT = (
     '  "dismiss the dentist appointment" -> {"intent": "dismiss_action_item", "title": "dentist"}\n'
     '  "stop flagging shipping confirmations" -> {"intent": "add_preference", "category": "extraction_rule", "rule_text": "Do not extract action items from shipping confirmation emails"}\n'
     '  "ignore emails from noreply@amazon.com" -> {"intent": "add_preference", "category": "sender_filter", "rule_text": "noreply@amazon.com"}\n'
-    '  "what rules have I set?" -> {"intent": "list_preferences"}'
+    '  "what rules have I set?" -> {"intent": "list_preferences"}\n'
+    '  "expand" / "show more" / "show the whole month" -> {"intent": "expand"}\n'
+    '  "what about next month" (after seeing action items) -> {"intent": "expand"}'
 )
 
 
@@ -104,10 +126,16 @@ def _birthday_in_range(birth_month: int, birth_day: int, start: date, end: date)
     return start <= bday <= end
 
 
-def _format_action_items(items: list[dict]) -> str:
+def _format_action_items(items: list[dict], start: str = "", end: str = "") -> str:
     if not items:
+        if start and end:
+            return f"No action items found for {start} to {end}."
         return "No upcoming action items found."
-    lines = ["<b>Upcoming Action Items</b>"]
+    header = "<b>Action Items"
+    if start and end:
+        header += f" ({start} to {end})"
+    header += "</b>"
+    lines = [header]
     for item in items:
         due = item.get("due_date") or "no date"
         time_part = f" {item['due_time']}" if item.get("due_time") else ""
@@ -180,33 +208,64 @@ def handle_message(user_message: str) -> str:
     intent = parsed.get("intent", "unknown")
 
     if intent == "action_items":
+        today = date.today()
         if "start_date" in parsed and "end_date" in parsed:
-            items = get_action_items_between(parsed["start_date"], parsed["end_date"])
+            start_s, end_s = parsed["start_date"], parsed["end_date"]
+        elif "days_ahead" in parsed:
+            start_s = today.isoformat()
+            end_s = (today + timedelta(days=int(parsed["days_ahead"]))).isoformat()
         else:
-            days_ahead = int(parsed.get("days_ahead", 7))
-            items = get_action_items_between(
-                date.today().isoformat(),
-                (date.today() + timedelta(days=days_ahead)).isoformat(),
-            )
-        return _format_action_items(list(items))
+            # Default: rest of current month
+            start_s = today.isoformat()
+            end_s = _end_of_month(today).isoformat()
+        items = get_action_items_between(start_s, end_s)
+        _last_query.update(intent="action_items", start_date=start_s, end_date=end_s)
+        return _format_action_items(list(items), start=start_s, end=end_s)
 
     if intent == "birthdays":
+        today = date.today()
         if "start_date" in parsed and "end_date" in parsed:
-            # Convert date range to days_ahead from today
-            end = date.fromisoformat(parsed["end_date"])
             start = date.fromisoformat(parsed["start_date"])
-            today = date.today()
-            days_ahead = max((end - today).days, 0)
+            end = date.fromisoformat(parsed["end_date"])
+        elif "days_ahead" in parsed:
+            start = today
+            end = today + timedelta(days=int(parsed["days_ahead"]))
+        else:
+            # Default: rest of current month
+            start = today
+            end = _end_of_month(today)
+        days_ahead = max((end - today).days, 0)
+        items = get_upcoming_birthdays(days_ahead=days_ahead)
+        items = [
+            b for b in items
+            if _birthday_in_range(b["birth_month"], b["birth_day"], start, end)
+        ]
+        _last_query.update(intent="birthdays", start_date=start.isoformat(), end_date=end.isoformat())
+        return _format_birthdays(list(items))
+
+    if intent == "expand":
+        if not _last_query:
+            return "Nothing to expand yet. Try asking about your action items or birthdays first."
+        # Widen: extend end_date to end of next month from the previous end_date
+        prev_end = date.fromisoformat(_last_query["end_date"])
+        new_end = _next_month_end(prev_end)
+        start_s = _last_query.get("start_date", date.today().isoformat())
+        end_s = new_end.isoformat()
+        if _last_query["intent"] == "action_items":
+            items = get_action_items_between(start_s, end_s)
+            _last_query.update(end_date=end_s)
+            return _format_action_items(list(items), start=start_s, end=end_s)
+        elif _last_query["intent"] == "birthdays":
+            start = date.fromisoformat(start_s)
+            days_ahead = max((new_end - date.today()).days, 0)
             items = get_upcoming_birthdays(days_ahead=days_ahead)
-            # Filter to only include birthdays within the requested range
             items = [
                 b for b in items
-                if _birthday_in_range(b["birth_month"], b["birth_day"], start, end)
+                if _birthday_in_range(b["birth_month"], b["birth_day"], start, new_end)
             ]
-        else:
-            days_ahead = int(parsed.get("days_ahead", 14))
-            items = get_upcoming_birthdays(days_ahead=days_ahead)
-        return _format_birthdays(list(items))
+            _last_query.update(end_date=end_s)
+            return _format_birthdays(list(items))
+        return "I can only expand action items or birthday queries."
 
     if intent == "delete_birthday":
         name = parsed.get("name", "")
