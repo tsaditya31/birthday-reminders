@@ -53,8 +53,11 @@ def init_db():
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS processed_emails (
-                    message_id   TEXT PRIMARY KEY,
-                    processed_at TEXT NOT NULL
+                    message_id          TEXT NOT NULL,
+                    processing_type     TEXT NOT NULL DEFAULT 'birthday',
+                    extraction_version  INTEGER DEFAULT 1,
+                    processed_at        TEXT NOT NULL,
+                    PRIMARY KEY (message_id, processing_type)
                 )
             """)
             cur.execute("""
@@ -120,6 +123,30 @@ def init_db():
             _add_column_if_missing(cur, "action_items", "category", "TEXT")
             _add_column_if_missing(cur, "action_items", "confidence", "REAL")
             _add_column_if_missing(cur, "action_items", "source_snippet", "TEXT")
+
+            # Migrate processed_emails: add processing_type + extraction_version columns
+            # and convert from single-column PK to composite PK
+            _add_column_if_missing(cur, "processed_emails", "processing_type", "TEXT NOT NULL DEFAULT 'birthday'")
+            _add_column_if_missing(cur, "processed_emails", "extraction_version", "INTEGER DEFAULT 1")
+            # Migrate PK: if old single-column PK exists, recreate as composite
+            cur.execute("""
+                SELECT 1 FROM information_schema.table_constraints
+                WHERE table_name = 'processed_emails'
+                  AND constraint_type = 'PRIMARY KEY'
+                  AND constraint_name = 'processed_emails_pkey'
+            """)
+            if cur.fetchone():
+                # Check if the PK already includes processing_type
+                cur.execute("""
+                    SELECT COUNT(*) as col_count
+                    FROM information_schema.key_column_usage
+                    WHERE table_name = 'processed_emails'
+                      AND constraint_name = 'processed_emails_pkey'
+                """)
+                col_count = cur.fetchone()["col_count"]
+                if col_count == 1:
+                    cur.execute("ALTER TABLE processed_emails DROP CONSTRAINT processed_emails_pkey")
+                    cur.execute("ALTER TABLE processed_emails ADD PRIMARY KEY (message_id, processing_type)")
 
 
 # ── Birthday helpers ──────────────────────────────────────────────────────────
@@ -313,22 +340,41 @@ def mark_action_notified(item_id: int, flag: str):
 
 # ── Processed-email helpers ───────────────────────────────────────────────────
 
-def is_email_processed(message_id: str) -> bool:
+def is_email_processed(message_id: str, processing_type: str = "birthday") -> bool:
+    current_version = settings.extraction_version
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM processed_emails WHERE message_id = %s", (message_id,)
+                """SELECT 1 FROM processed_emails
+                   WHERE message_id = %s
+                     AND processing_type = %s
+                     AND extraction_version >= %s""",
+                (message_id, processing_type, current_version),
             )
             return cur.fetchone() is not None
 
 
-def mark_email_processed(message_id: str):
+def mark_email_processed(message_id: str, processing_type: str = "birthday"):
     now = datetime.now(timezone.utc).isoformat()
+    current_version = settings.extraction_version
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO processed_emails (message_id, processed_at) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (message_id, now),
+                """INSERT INTO processed_emails (message_id, processing_type, extraction_version, processed_at)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (message_id, processing_type)
+                   DO UPDATE SET extraction_version = %s, processed_at = %s""",
+                (message_id, processing_type, current_version, now, current_version, now),
+            )
+
+
+def clear_processed_emails(processing_type: str):
+    """Delete all processed-email records for a given type, allowing full re-crawl."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM processed_emails WHERE processing_type = %s",
+                (processing_type,),
             )
 
 

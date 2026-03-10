@@ -216,14 +216,14 @@ def crawl_emails(max_per_query: int = 200) -> list[RawEmail]:
                     continue
                 seen_ids.add(msg_id)
 
-                if is_email_processed(msg_id):
+                if is_email_processed(msg_id, processing_type="birthday"):
                     logger.debug("Skipping already-processed message %s", msg_id)
                     continue
 
                 raw = _fetch_message(service, msg_id)
                 if raw:
                     results.append(raw)
-                    mark_email_processed(msg_id)
+                    mark_email_processed(msg_id, processing_type="birthday")
 
             fetched += len(messages)
             page_token = response.get("nextPageToken")
@@ -278,14 +278,14 @@ def crawl_action_emails(days_back: int = 3, max_per_query: int = 50) -> list[Raw
                     continue
                 seen_ids.add(msg_id)
 
-                if is_email_processed(msg_id):
+                if is_email_processed(msg_id, processing_type="action"):
                     logger.debug("Skipping already-processed message %s", msg_id)
                     continue
 
                 raw = _fetch_message(service, msg_id)
                 if raw:
                     results.append(raw)
-                    mark_email_processed(msg_id)
+                    mark_email_processed(msg_id, processing_type="action")
 
             fetched += len(messages)
             page_token = response.get("nextPageToken")

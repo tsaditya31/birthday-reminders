@@ -21,9 +21,12 @@ class Settings(BaseSettings):
 
     # Crawler settings
     birthday_lookback_days: int = 730
-    action_lookback_days: int = 60
+    action_lookback_days: int = 180
     gmail_max_retries: int = 3
     gmail_retry_base_delay: float = 1.0
+
+    # Extraction versioning — bump when extraction logic changes meaningfully
+    extraction_version: int = 1
 
     # Feedback settings
     feedback_example_count: int = 10
