@@ -86,6 +86,10 @@ def cmd_crawl():
                 due_time=item.due_time,
                 email_subject=item.email_subject,
                 email_from=item.email_from,
+                priority=item.priority,
+                category=item.category,
+                confidence=item.confidence,
+                source_snippet=item.source_snippet,
             )
             saved += 1
         logger.info("%d action items saved/updated.", saved)

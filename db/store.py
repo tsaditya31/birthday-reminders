@@ -76,6 +76,10 @@ def init_db():
                     description      TEXT,
                     due_date         TEXT,
                     due_time         TEXT,
+                    priority         TEXT DEFAULT 'normal',
+                    category         TEXT,
+                    confidence       REAL,
+                    source_snippet   TEXT,
                     email_message_id TEXT,
                     email_subject    TEXT,
                     email_from       TEXT,
@@ -86,10 +90,36 @@ def init_db():
                     updated_at       TEXT
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS action_feedback (
+                    id                SERIAL PRIMARY KEY,
+                    feedback_type     TEXT NOT NULL,
+                    action_item_id    INTEGER,
+                    email_message_id  TEXT,
+                    user_comment      TEXT,
+                    original_type     TEXT,
+                    corrected_type    TEXT,
+                    original_date     TEXT,
+                    corrected_date    TEXT,
+                    created_at        TEXT
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS learned_queries (
+                    id          SERIAL PRIMARY KEY,
+                    query       TEXT NOT NULL UNIQUE,
+                    source      TEXT,
+                    created_at  TEXT
+                )
+            """)
 
             # Migrations for existing tables
             _add_column_if_missing(cur, "birthdays", "dismissed", "BOOLEAN DEFAULT FALSE")
             _add_column_if_missing(cur, "action_items", "dismissed", "BOOLEAN DEFAULT FALSE")
+            _add_column_if_missing(cur, "action_items", "priority", "TEXT DEFAULT 'normal'")
+            _add_column_if_missing(cur, "action_items", "category", "TEXT")
+            _add_column_if_missing(cur, "action_items", "confidence", "REAL")
+            _add_column_if_missing(cur, "action_items", "source_snippet", "TEXT")
 
 
 # ── Birthday helpers ──────────────────────────────────────────────────────────
@@ -188,6 +218,10 @@ def upsert_action_item(
     due_time: Optional[str] = None,
     email_subject: Optional[str] = None,
     email_from: Optional[str] = None,
+    priority: Optional[str] = None,
+    category: Optional[str] = None,
+    confidence: Optional[float] = None,
+    source_snippet: Optional[str] = None,
 ) -> int:
     """Insert or update an action item. Dedup on (email_message_id, type)."""
     now = datetime.now(timezone.utc).isoformat()
@@ -206,19 +240,26 @@ def upsert_action_item(
                         description = COALESCE(%s, description),
                         due_date = COALESCE(%s, due_date),
                         due_time = COALESCE(%s, due_time),
+                        priority = COALESCE(%s, priority),
+                        category = COALESCE(%s, category),
+                        confidence = COALESCE(%s, confidence),
+                        source_snippet = COALESCE(%s, source_snippet),
                         updated_at = %s
                     WHERE id = %s""",
-                    (title, description, due_date, due_time, now, existing["id"]),
+                    (title, description, due_date, due_time, priority, category,
+                     confidence, source_snippet, now, existing["id"]),
                 )
                 return existing["id"]
             else:
                 cur.execute(
                     """INSERT INTO action_items
-                        (type, title, description, due_date, due_time,
+                        (type, title, description, due_date, due_time, priority, category,
+                         confidence, source_snippet,
                          email_message_id, email_subject, email_from, created_at, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        RETURNING id""",
-                    (type, title, description, due_date, due_time,
+                    (type, title, description, due_date, due_time, priority, category,
+                     confidence, source_snippet,
                      email_message_id, email_subject, email_from, now, now),
                 )
                 return cur.fetchone()["id"]
@@ -344,10 +385,21 @@ def dismiss_action_item(item_id: int):
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         with conn.cursor() as cur:
+            # Get item details for implicit feedback
+            cur.execute("SELECT type, email_message_id FROM action_items WHERE id = %s", (item_id,))
+            item = cur.fetchone()
             cur.execute(
                 "UPDATE action_items SET dismissed = TRUE, updated_at = %s WHERE id = %s",
                 (now, item_id),
             )
+            # Record implicit not_useful feedback
+            if item:
+                cur.execute(
+                    """INSERT INTO action_feedback
+                        (feedback_type, action_item_id, email_message_id, original_type, created_at)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    ("not_useful", item_id, item.get("email_message_id"), item.get("type"), now),
+                )
 
 
 def find_birthday_by_name(name: str) -> Optional[dict]:
@@ -368,3 +420,86 @@ def find_action_item_by_title(title: str) -> Optional[dict]:
                 (f"%{title.lower()}%",),
             )
             return cur.fetchone()
+
+
+# ── Feedback helpers ────────────────────────────────────────────────────────
+
+def insert_feedback(
+    feedback_type: str,
+    action_item_id: Optional[int] = None,
+    email_message_id: Optional[str] = None,
+    user_comment: Optional[str] = None,
+    original_type: Optional[str] = None,
+    corrected_type: Optional[str] = None,
+    original_date: Optional[str] = None,
+    corrected_date: Optional[str] = None,
+) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO action_feedback
+                    (feedback_type, action_item_id, email_message_id, user_comment,
+                     original_type, corrected_type, original_date, corrected_date, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   RETURNING id""",
+                (feedback_type, action_item_id, email_message_id, user_comment,
+                 original_type, corrected_type, original_date, corrected_date, now),
+            )
+            return cur.fetchone()["id"]
+
+
+def get_recent_feedback(limit: int = 10) -> list[dict]:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT af.*, ai.title as item_title, ai.type as item_type,
+                          ai.email_subject, ai.description as item_description
+                   FROM action_feedback af
+                   LEFT JOIN action_items ai ON af.action_item_id = ai.id
+                   ORDER BY af.created_at DESC LIMIT %s""",
+                (limit,),
+            )
+            return cur.fetchall()
+
+
+def get_feedback_stats(days: int = 30) -> dict:
+    """Return counts of useful vs not_useful feedback over the last N days."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT feedback_type, COUNT(*) as cnt
+                   FROM action_feedback
+                   WHERE created_at >= %s
+                   GROUP BY feedback_type""",
+                (cutoff,),
+            )
+            rows = cur.fetchall()
+    stats = {r["feedback_type"]: r["cnt"] for r in rows}
+    return stats
+
+
+# ── Learned query helpers ───────────────────────────────────────────────────
+
+def add_learned_query(query: str, source: Optional[str] = None) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO learned_queries (query, source, created_at)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (query) DO NOTHING
+                   RETURNING id""",
+                (query, source, now),
+            )
+            row = cur.fetchone()
+            return row["id"] if row else 0
+
+
+def get_learned_queries() -> list[str]:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT query FROM learned_queries ORDER BY created_at")
+            return [r["query"] for r in cur.fetchall()]

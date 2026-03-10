@@ -15,7 +15,7 @@ from notifier.telegram_notifier import send_message
 logger = logging.getLogger(__name__)
 
 _BASE = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
-_POLL_INTERVAL = 2  # seconds between getUpdates calls
+_POLL_INTERVAL = settings.bot_poll_interval
 _TIMEOUT = 30       # long-poll timeout (seconds)
 
 

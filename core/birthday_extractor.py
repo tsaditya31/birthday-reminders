@@ -11,14 +11,15 @@ from typing import Optional
 import anthropic
 
 from config import settings
+from core.utils import strip_json_markdown
 from crawler.gmail_crawler import RawEmail
 
 logger = logging.getLogger(__name__)
 
 client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-BATCH_SIZE = 20
-MIN_CONFIDENCE = 0.6
+BATCH_SIZE = settings.extraction_batch_size
+MIN_CONFIDENCE = settings.birthday_confidence_threshold
 
 SYSTEM_PROMPT = """You are an assistant that extracts birthday information from emails.
 For each email you receive, extract structured data and return valid JSON.
@@ -92,14 +93,7 @@ def _call_claude(batch: list[RawEmail]) -> list[dict]:
         messages=[{"role": "user", "content": prompt}],
     )
 
-    raw_text = message.content[0].text.strip()
-
-    # Strip markdown code fences if present
-    if raw_text.startswith("```"):
-        raw_text = raw_text.split("```")[1]
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
-    raw_text = raw_text.strip()
+    raw_text = strip_json_markdown(message.content[0].text)
 
     try:
         return json.loads(raw_text)

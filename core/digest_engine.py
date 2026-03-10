@@ -5,6 +5,7 @@ Telegram digest. Returns None when there is nothing actionable to send.
 
 import logging
 from datetime import date, timedelta
+from html import escape
 from typing import Optional
 
 from crawler.gmail_crawler import crawl_action_emails
@@ -28,34 +29,26 @@ def _days_until_date(due_date_str: str) -> int:
     return (due - today).days
 
 
-def _format_appointment_line(row) -> str:
-    days = _days_until_date(row["due_date"])
-    time_str = f", {row['due_time']}" if row["due_time"] else ""
-    if days == 0:
-        timing = "Today"
-    elif days == 1:
-        timing = "Tomorrow"
+def _format_item_line(row) -> str:
+    """Format a single action item line for the digest."""
+    if row.get("due_date"):
+        days = _days_until_date(row["due_date"])
+        time_str = f", {row['due_time']}" if row.get("due_time") else ""
+        if days == 0:
+            timing = "Today"
+        elif days == 1:
+            timing = "Tomorrow"
+        else:
+            timing = f"In {days} days"
+        line = f"• {timing}: {escape(row['title'])}{time_str}"
     else:
-        timing = f"In {days} days"
-    return f"• {timing}: {row['title']}{time_str}"
-
-
-def _format_deadline_line(row) -> str:
-    days = _days_until_date(row["due_date"])
-    if days == 0:
-        timing = "Today"
-    elif days == 1:
-        timing = "Tomorrow"
-    else:
-        timing = f"In {days} days"
-    sender = f" ({row['email_from'].split('<')[0].strip()})" if row["email_from"] else ""
-    return f"• {timing}: {row['title']}{sender}"
-
-
-def _format_urgent_line(row) -> str:
-    sender = row["email_from"].split("<")[0].strip() if row["email_from"] else "Unknown"
-    subject = row["email_subject"] or row["title"]
-    return f'• {sender} — "{subject}"'
+        line = f"• {escape(row['title'])}"
+    item_type = row.get("type", "")
+    category = row.get("category", "")
+    tag = category or item_type
+    if tag:
+        line += f" [{escape(tag)}]"
+    return line
 
 
 def _format_birthday_line(msg: str) -> str:
@@ -65,10 +58,33 @@ def _format_birthday_line(msg: str) -> str:
     return f"• {first_line}"
 
 
+def _priority_early_days(priority: str) -> int:
+    """How many days before due_date to send an early notification."""
+    return {"urgent": 0, "high": 3, "normal": 2, "low": 0}.get(priority, 2)
+
+
+def _should_notify(row: dict) -> Optional[str]:
+    """Determine if a row should be notified now. Returns flag ('early'|'day') or None."""
+    priority = row.get("priority") or "normal"
+    if not row.get("due_date"):
+        # No due date — notify urgent/high immediately if not yet notified
+        if priority in ("urgent", "high") and not row["notified_day"]:
+            return "day"
+        return None
+    days = _days_until_date(row["due_date"])
+    if days == 0 and not row["notified_day"]:
+        return "day"
+    early_days = _priority_early_days(priority)
+    if early_days > 0 and days == early_days and not row["notified_early"]:
+        return "early"
+    return None
+
+
 def build_daily_digest(dry_run: bool = False) -> Optional[str]:
     """
     Full pipeline: crawl → extract → store → query → build HTML digest.
     Returns the digest string, or None if nothing is actionable today.
+    Priority-based grouping: urgent, high, normal/low.
     """
     today = date.today()
 
@@ -88,78 +104,78 @@ def build_daily_digest(dry_run: bool = False) -> Optional[str]:
                 due_time=item.due_time,
                 email_subject=item.email_subject,
                 email_from=item.email_from,
+                priority=item.priority,
+                category=item.category,
+                confidence=item.confidence,
+                source_snippet=item.source_snippet,
             )
     else:
         logger.info("No new action emails found.")
 
     # ── Step 2: Query DB for items to notify ─────────────────────────────────
+    # Widen to 3 days for early notifications
     upcoming = get_upcoming_action_items(days_ahead=3)
     urgent_items = get_unnotified_urgent()
 
-    # ── Step 3: Apply timing rules ────────────────────────────────────────────
-    appointments_to_send: list = []
-    deadlines_to_send: list = []
-    appointments_to_mark: list[tuple] = []  # (id, flag)
-    deadlines_to_mark: list[tuple] = []
+    # ── Step 3: Apply priority-based timing rules ─────────────────────────────
+    urgent_to_send: list = []
+    high_to_send: list = []
+    normal_to_send: list = []
+    items_to_mark: list[tuple] = []  # (id, flag)
 
     for row in upcoming:
-        days = _days_until_date(row["due_date"])
-        item_type = row["type"]
+        flag = _should_notify(row)
+        if flag:
+            priority = row.get("priority") or "normal"
+            if priority == "urgent":
+                urgent_to_send.append(row)
+            elif priority == "high":
+                high_to_send.append(row)
+            else:
+                normal_to_send.append(row)
+            items_to_mark.append((row["id"], flag))
 
-        if item_type == "appointment":
-            if days == 0 and not row["notified_day"]:
-                appointments_to_send.append(row)
-                appointments_to_mark.append((row["id"], "day"))
-            elif days == 2 and not row["notified_early"]:
-                appointments_to_send.append(row)
-                appointments_to_mark.append((row["id"], "early"))
-
-        elif item_type == "deadline":
-            if days == 0 and not row["notified_day"]:
-                deadlines_to_send.append(row)
-                deadlines_to_mark.append((row["id"], "day"))
-            elif days == 3 and not row["notified_early"]:
-                deadlines_to_send.append(row)
-                deadlines_to_mark.append((row["id"], "early"))
+    # Add unnotified urgent_reply items (legacy type) to urgent bucket
+    for row in urgent_items:
+        if row["id"] not in {r["id"] for r in urgent_to_send}:
+            urgent_to_send.append(row)
+            items_to_mark.append((row["id"], "day"))
 
     # ── Step 4: Birthday alerts ───────────────────────────────────────────────
     birthday_alerts = get_birthday_alerts()  # list of (msg, bid, flag)
 
     # ── Step 5: Bail if nothing to send ──────────────────────────────────────
-    if not appointments_to_send and not deadlines_to_send and not urgent_items and not birthday_alerts:
+    if not urgent_to_send and not high_to_send and not normal_to_send and not birthday_alerts:
         logger.info("Nothing actionable today.")
         return None
 
-    # ── Step 6: Build HTML digest ─────────────────────────────────────────────
+    # ── Step 6: Build HTML digest (priority-based) ────────────────────────────
     day_label = today.strftime("%a %b %-d")
     lines = [f"📅 <b>Daily Digest — {day_label}</b>"]
 
-    if appointments_to_send:
+    if urgent_to_send:
         lines.append("")
-        lines.append("🏥 <b>Appointments</b>")
-        for row in appointments_to_send:
-            lines.append(_format_appointment_line(row))
+        lines.append("🚨 <b>Urgent</b>")
+        for row in urgent_to_send:
+            lines.append(_format_item_line(row))
 
-    if deadlines_to_send:
+    if high_to_send:
         lines.append("")
-        lines.append("⏰ <b>Deadlines</b>")
-        for row in deadlines_to_send:
-            lines.append(_format_deadline_line(row))
+        lines.append("⚡ <b>Important</b>")
+        for row in high_to_send:
+            lines.append(_format_item_line(row))
 
-    if urgent_items:
+    if normal_to_send:
         lines.append("")
-        lines.append("📬 <b>Reply Needed</b>")
-        for row in urgent_items:
-            lines.append(_format_urgent_line(row))
+        lines.append("📋 <b>Coming Up</b>")
+        for row in normal_to_send:
+            lines.append(_format_item_line(row))
 
     if birthday_alerts:
         lines.append("")
         lines.append("🎂 <b>Birthdays</b>")
         for msg, _bid, _flag in birthday_alerts:
-            # For annas_friend the message may have Amazon links — include in full
-            # For simple reminders, embed inline
             lines.append(_format_birthday_line(msg))
-            # If message has more than one line (e.g. Amazon links), append rest indented
             extra_lines = msg.split("\n")[1:]
             for extra in extra_lines:
                 if extra.strip():
@@ -169,12 +185,8 @@ def build_daily_digest(dry_run: bool = False) -> Optional[str]:
 
     # ── Step 7: Mark notifications (skip in dry_run) ──────────────────────────
     if not dry_run:
-        for item_id, flag in appointments_to_mark:
+        for item_id, flag in items_to_mark:
             mark_action_notified(item_id, flag)
-        for item_id, flag in deadlines_to_mark:
-            mark_action_notified(item_id, flag)
-        for row in urgent_items:
-            mark_action_notified(row["id"], "day")
         for _msg, bid, flag in birthday_alerts:
             mark_notified(bid, flag)
 

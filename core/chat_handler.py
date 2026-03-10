@@ -13,7 +13,9 @@ from html import escape
 import anthropic
 
 from config import settings
+from core.utils import strip_json_markdown
 from db.store import (
+    add_learned_query,
     add_preference,
     deactivate_preference,
     dismiss_action_item,
@@ -24,6 +26,8 @@ from db.store import (
     get_active_preferences,
     get_upcoming_action_items,
     get_upcoming_birthdays,
+    insert_feedback,
+    upsert_action_item,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,7 +60,8 @@ SYSTEM_PROMPT = (
     "\"expand that\", \"show me the whole month\", \"more details\", etc.\n\n"
     "Supported intents:\n"
     "  action_items, birthdays, expand, help, unknown,\n"
-    "  delete_birthday, dismiss_action_item, add_preference, list_preferences\n\n"
+    "  delete_birthday, dismiss_action_item, add_preference, list_preferences,\n"
+    "  feedback_useful, feedback_not_useful, feedback_missed, feedback_correct\n\n"
     'Use "expand" when the user wants to see MORE of what was just shown — e.g. "expand", '
     '"show more", "show the whole month", "what about next month too", "wider range".\n\n'
     "For action_items and birthdays, return EITHER:\n"
@@ -71,6 +76,16 @@ SYSTEM_PROMPT = (
     '  - Use "extraction_rule" for rules about what to extract or ignore (e.g. "stop flagging shipping confirmations")\n'
     '  - Use "sender_filter" for blocking emails from specific senders (e.g. "ignore emails from noreply@amazon.com")\n'
     'For list_preferences: {"intent": "list_preferences"}\n\n'
+    "Feedback intents:\n"
+    'For feedback_useful: {"intent": "feedback_useful", "title": "<search term>"}\n'
+    '  — user says something like "that dentist appointment was helpful"\n'
+    'For feedback_not_useful: {"intent": "feedback_not_useful", "title": "<search term>"}\n'
+    '  — user says something like "the Amazon shipping one was irrelevant"\n'
+    'For feedback_missed: {"intent": "feedback_missed", "description": "<what was missed>"}\n'
+    '  — user says something like "you missed an email from my lawyer about a filing deadline"\n'
+    'For feedback_correct: {"intent": "feedback_correct", "title": "<search term>", '
+    '"corrected_type": "<new type>", "corrected_date": "<YYYY-MM-DD or null>"}\n'
+    '  — user says something like "the passport item should be renewal not deadline"\n\n'
     f"Today's date is {date.today().isoformat()}.\n"
     "Return ONLY valid JSON.\n"
     "Examples:\n"
@@ -82,7 +97,11 @@ SYSTEM_PROMPT = (
     '  "ignore emails from noreply@amazon.com" -> {"intent": "add_preference", "category": "sender_filter", "rule_text": "noreply@amazon.com"}\n'
     '  "what rules have I set?" -> {"intent": "list_preferences"}\n'
     '  "expand" / "show more" / "show the whole month" -> {"intent": "expand"}\n'
-    '  "what about next month" (after seeing action items) -> {"intent": "expand"}'
+    '  "what about next month" (after seeing action items) -> {"intent": "expand"}\n'
+    '  "that dentist reminder was helpful" -> {"intent": "feedback_useful", "title": "dentist"}\n'
+    '  "the Amazon one was irrelevant" -> {"intent": "feedback_not_useful", "title": "Amazon"}\n'
+    '  "you missed my lawyer email about a filing" -> {"intent": "feedback_missed", "description": "lawyer email about filing deadline"}\n'
+    '  "the passport item should be renewal not deadline" -> {"intent": "feedback_correct", "title": "passport", "corrected_type": "renewal"}'
 )
 
 
@@ -94,13 +113,9 @@ def _parse_intent(user_message: str) -> dict:
         system=SYSTEM_PROMPT,
         messages=messages,
     )
-    raw = message.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
+    raw = strip_json_markdown(message.content[0].text)
     try:
-        parsed = json.loads(raw.strip())
+        parsed = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning("Claude returned non-JSON intent: %s", raw[:200])
         parsed = {"intent": "unknown"}
@@ -190,7 +205,12 @@ _HELP_TEXT = (
     "• <i>remove a birthday</i> — e.g. \"remove John's birthday\"\n"
     "• <i>dismiss an action item</i> — e.g. \"dismiss the dentist appointment\"\n"
     "• <i>set preferences</i> — e.g. \"stop flagging shipping confirmations\"\n"
-    "• <i>list preferences</i> — see your active rules\n\n"
+    "• <i>list preferences</i> — see your active rules\n"
+    "• <i>feedback</i> — help me improve:\n"
+    "  - \"that dentist reminder was helpful\"\n"
+    "  - \"the Amazon one was irrelevant\"\n"
+    "  - \"you missed my lawyer email about a filing\"\n"
+    "  - \"the passport item should be renewal not deadline\"\n\n"
     "Examples:\n"
     '  "what are my action items this week?"\n'
     '  "action items for March"\n'
@@ -329,6 +349,152 @@ def handle_message(user_message: str) -> str:
             cat_label = "Extraction rule" if p["category"] == "extraction_rule" else "Sender filter"
             lines.append(f"• [{cat_label}] <i>{escape(p['rule_text'])}</i> (#{p['id']})")
         return "\n".join(lines)
+
+    if intent == "feedback_useful":
+        title = parsed.get("title", "")
+        if not title:
+            return "Which action item was helpful? Please describe it."
+        match = find_action_item_by_title(title)
+        if not match:
+            return f"I couldn't find an action item matching \"{escape(title)}\"."
+        insert_feedback(
+            feedback_type="useful",
+            action_item_id=match["id"],
+            email_message_id=match.get("email_message_id"),
+            original_type=match.get("type"),
+        )
+        return _conversational(
+            [
+                "Thanks! Noted that \"<b>{title}</b>\" was useful. I'll prioritize similar items.",
+                "Good to know \"<b>{title}</b>\" was helpful — I'll learn from this.",
+            ],
+            title=escape(match["title"]),
+        )
+
+    if intent == "feedback_not_useful":
+        title = parsed.get("title", "")
+        if not title:
+            return "Which action item was not useful? Please describe it."
+        match = find_action_item_by_title(title)
+        if not match:
+            return f"I couldn't find an action item matching \"{escape(title)}\"."
+        insert_feedback(
+            feedback_type="not_useful",
+            action_item_id=match["id"],
+            email_message_id=match.get("email_message_id"),
+            original_type=match.get("type"),
+            user_comment=user_message,
+        )
+        return _conversational(
+            [
+                "Got it — \"<b>{title}</b>\" wasn't useful. I'll avoid flagging similar items.",
+                "Noted! I'll be less aggressive about items like \"<b>{title}</b>\".",
+            ],
+            title=escape(match["title"]),
+        )
+
+    if intent == "feedback_missed":
+        description = parsed.get("description", "")
+        if not description:
+            return "What did I miss? Please describe the email or action item."
+        # Use Claude to generate a Gmail search query from the description
+        query_msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            system="Generate a single Gmail search query to find the described email. Return ONLY the query string, nothing else.",
+            messages=[{"role": "user", "content": f"Find an email about: {description}"}],
+        )
+        gmail_query = query_msg.content[0].text.strip().strip('"')
+        # Store the learned query
+        add_learned_query(gmail_query, source=f"feedback: {description}")
+        # Record feedback
+        insert_feedback(
+            feedback_type="missed",
+            user_comment=description,
+        )
+        # Run immediate targeted crawl
+        from crawler.gmail_crawler import crawl_action_emails
+        from core.action_extractor import extract_action_items
+        from core.preferences import get_blocked_senders
+        raw_emails = crawl_action_emails(days_back=60, max_per_query=50)
+        found_count = 0
+        if raw_emails:
+            blocked = get_blocked_senders()
+            if blocked:
+                raw_emails = [e for e in raw_emails if not any(b in e.sender.lower() for b in blocked)]
+            actions = extract_action_items(raw_emails)
+            for item in actions:
+                upsert_action_item(
+                    type=item.type,
+                    title=item.title,
+                    email_message_id=item.email_message_id,
+                    description=item.description,
+                    due_date=item.due_date,
+                    due_time=item.due_time,
+                    email_subject=item.email_subject,
+                    email_from=item.email_from,
+                    priority=item.priority,
+                    category=item.category,
+                    confidence=item.confidence,
+                    source_snippet=item.source_snippet,
+                )
+                found_count += 1
+        if found_count > 0:
+            return (
+                f"Thanks for letting me know! I've added the search query \"{escape(gmail_query)}\" "
+                f"and re-scanned your emails. Found <b>{found_count}</b> new action item(s). "
+                "I'll use this query in future crawls too."
+            )
+        return (
+            f"Thanks for the feedback! I've added the search query \"{escape(gmail_query)}\" "
+            "for future crawls. No new items found right now, but I'll catch them next time."
+        )
+
+    if intent == "feedback_correct":
+        title = parsed.get("title", "")
+        if not title:
+            return "Which action item needs correction? Please describe it."
+        match = find_action_item_by_title(title)
+        if not match:
+            return f"I couldn't find an action item matching \"{escape(title)}\"."
+        corrected_type = parsed.get("corrected_type")
+        corrected_date = parsed.get("corrected_date")
+        insert_feedback(
+            feedback_type="wrong_type" if corrected_type else "wrong_date",
+            action_item_id=match["id"],
+            email_message_id=match.get("email_message_id"),
+            original_type=match.get("type"),
+            corrected_type=corrected_type,
+            original_date=match.get("due_date"),
+            corrected_date=corrected_date,
+        )
+        # Apply correction directly to the item
+        updates = {}
+        if corrected_type:
+            updates["type"] = corrected_type
+        if corrected_date:
+            updates["due_date"] = corrected_date
+        if updates:
+            from db.store import get_db
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    set_clauses = ", ".join(f"{k} = %s" for k in updates)
+                    values = list(updates.values()) + [now, match["id"]]
+                    cur.execute(
+                        f"UPDATE action_items SET {set_clauses}, updated_at = %s WHERE id = %s",
+                        values,
+                    )
+        parts = []
+        if corrected_type:
+            parts.append(f"type → <b>{escape(corrected_type)}</b>")
+        if corrected_date:
+            parts.append(f"date → <b>{escape(corrected_date)}</b>")
+        return (
+            f"Updated \"<b>{escape(match['title'])}</b>\": {', '.join(parts)}. "
+            "I'll remember this for future extractions."
+        )
 
     if intent == "help":
         return _HELP_TEXT

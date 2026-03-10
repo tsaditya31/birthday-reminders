@@ -6,6 +6,7 @@ Returns RawEmail objects; deduplicates against processed_emails table.
 import base64
 import email as email_lib
 import logging
+import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Optional
@@ -16,6 +17,25 @@ from googleapiclient.discovery import build
 
 from config import settings
 from db.store import is_email_processed, mark_email_processed
+
+BIRTHDAY_LOOKBACK_DAYS = settings.birthday_lookback_days
+MAX_RETRIES = settings.gmail_max_retries
+RETRY_BASE_DELAY = settings.gmail_retry_base_delay
+
+
+def _retry_api_call(func, description: str):
+    """Execute a Gmail API call with exponential backoff."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            return func()
+        except Exception as exc:
+            if attempt == MAX_RETRIES - 1:
+                logger.error("%s failed after %d retries: %s", description, MAX_RETRIES, exc)
+                raise
+            delay = RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning("%s failed (attempt %d/%d): %s — retrying in %.1fs",
+                           description, attempt + 1, MAX_RETRIES, exc, delay)
+            time.sleep(delay)
 
 logger = logging.getLogger(__name__)
 
@@ -31,18 +51,51 @@ SEARCH_QUERIES = [
 ]
 
 ACTION_QUERIES = [
+    # Appointments & meetings
     "subject:appointment",
     "subject:reminder",
     '"your appointment"',
+    '"your meeting"',
+    "subject:scheduled",
+    "subject:booking",
+    "subject:confirmation",
+    # Deadlines & responses
     '"RSVP by"',
     '"deadline"',
     '"due by"',
     '"respond by"',
     '"action required"',
-    "urgent",
     '"please respond"',
     '"time sensitive"',
+    '"please complete"',
+    '"next steps"',
+    '"follow up"',
+    '"follow-up"',
+    "urgent",
+    # Payments & renewals
+    '"payment due"',
+    '"invoice"',
+    '"renewal notice"',
+    '"expires on"',
+    '"expiring soon"',
+    # Legal & official
+    '"filing deadline"',
+    '"court date"',
+    '"notarize"',
+    '"sign by"',
 ]
+
+
+def get_all_action_queries() -> list[str]:
+    """Merge base ACTION_QUERIES with learned queries from the database."""
+    from db.store import get_learned_queries
+    learned = get_learned_queries()
+    base_set = set(q.lower() for q in ACTION_QUERIES)
+    merged = list(ACTION_QUERIES)
+    for q in learned:
+        if q.lower() not in base_set:
+            merged.append(q)
+    return merged
 
 
 @dataclass
@@ -69,8 +122,8 @@ def _build_service():
 
 
 def _after_date() -> str:
-    two_years_ago = date.today() - timedelta(days=730)
-    return two_years_ago.strftime("%Y/%m/%d")
+    cutoff = date.today() - timedelta(days=BIRTHDAY_LOOKBACK_DAYS)
+    return cutoff.strftime("%Y/%m/%d")
 
 
 def _after_date_days_back(days_back: int) -> str:
@@ -102,9 +155,8 @@ def _get_header(headers: list[dict], name: str) -> str:
 
 def _fetch_message(service, msg_id: str) -> Optional[RawEmail]:
     try:
-        msg = service.users().messages().get(
-            userId="me", id=msg_id, format="full"
-        ).execute()
+        request = service.users().messages().get(userId="me", id=msg_id, format="full")
+        msg = _retry_api_call(request.execute, f"fetch message {msg_id}")
     except Exception as exc:
         logger.warning("Failed to fetch message %s: %s", msg_id, exc)
         return None
@@ -148,7 +200,8 @@ def crawl_emails(max_per_query: int = 200) -> list[RawEmail]:
                 params["pageToken"] = page_token
 
             try:
-                response = service.users().messages().list(**params).execute()
+                request = service.users().messages().list(**params)
+                response = _retry_api_call(request.execute, f"list messages for '{query}'")
             except Exception as exc:
                 logger.error("Gmail list failed for query '%s': %s", query, exc)
                 break
@@ -191,7 +244,8 @@ def crawl_action_emails(days_back: int = 3, max_per_query: int = 50) -> list[Raw
     seen_ids: set[str] = set()
     results: list[RawEmail] = []
 
-    for query in ACTION_QUERIES:
+    all_queries = get_all_action_queries()
+    for query in all_queries:
         full_query = f"{query} after:{after}"
         logger.info("Running action Gmail query: %s", full_query)
 
@@ -208,7 +262,8 @@ def crawl_action_emails(days_back: int = 3, max_per_query: int = 50) -> list[Raw
                 params["pageToken"] = page_token
 
             try:
-                response = service.users().messages().list(**params).execute()
+                request = service.users().messages().list(**params)
+                response = _retry_api_call(request.execute, f"list actions for '{query}'")
             except Exception as exc:
                 logger.error("Gmail list failed for query '%s': %s", query, exc)
                 break

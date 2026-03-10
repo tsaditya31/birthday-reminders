@@ -27,14 +27,20 @@ def _days_until(month: int, day: int) -> int:
     return (target - today).days
 
 
-def _compute_current_age(birth_year: int | None, birth_month: int, birth_day: int) -> int | None:
+def _compute_turning_age(birth_year: int | None, birth_month: int, birth_day: int) -> int | None:
+    """Return the age this person is turning on their next upcoming birthday."""
     if birth_year is None:
         return None
     today = date.today()
-    # Have they had their birthday yet this year?
-    had_birthday_this_year = (today.month, today.day) >= (birth_month, birth_day)
-    return today.year - birth_year - (0 if had_birthday_this_year else 1) + 1
-    # +1 because we want the age they're *turning*
+    # Find the next occurrence of this birthday
+    try:
+        this_year_bday = date(today.year, birth_month, birth_day)
+    except ValueError:
+        this_year_bday = date(today.year, birth_month, min(birth_day, 28))
+    if this_year_bday >= today:
+        return today.year - birth_year
+    else:
+        return today.year + 1 - birth_year
 
 
 def _format_basic_reminder(name: str, classification: str, days_until: int, age: int | None) -> str:
@@ -75,7 +81,7 @@ def get_birthday_alerts() -> list[BirthdayAlert]:
         birth_year = row["birth_year"]
 
         days = _days_until(birth_month, birth_day)
-        age = _compute_current_age(birth_year, birth_month, birth_day)
+        age = _compute_turning_age(birth_year, birth_month, birth_day)
 
         logger.info("%s: %d days away (classification=%s)", name, days, classification)
 
