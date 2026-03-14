@@ -1,7 +1,6 @@
 """
 Telegram bot — long-polling loop for inbound messages.
 Only responds to messages from the configured chat_id (security: ignores all others).
-Checks for due reminders every poll cycle.
 """
 
 import logging
@@ -11,7 +10,6 @@ import httpx
 
 from config import settings
 from core.chat_handler import handle_message
-from db.store import get_due_reminders, mark_reminder_sent
 from notifier.telegram_notifier import send_message
 
 logger = logging.getLogger(__name__)
@@ -47,27 +45,11 @@ def _delete_webhook():
         logger.warning("deleteWebhook failed: %s", exc)
 
 
-def _check_reminders():
-    """Send any due reminders and mark them as sent."""
-    try:
-        due = get_due_reminders()
-        for r in due:
-            text = f"Reminder: {r['reminder_text']}"
-            send_message(text, parse_mode="")
-            mark_reminder_sent(r["id"])
-            logger.info("Sent reminder #%s: %s", r["id"], r["reminder_text"][:60])
-    except Exception as exc:
-        logger.warning("Reminder check error: %s", exc)
-
-
 def run_polling_loop():
     """Block forever, polling Telegram for new messages and replying."""
     _delete_webhook()
     logger.info("Telegram bot polling started (chat_id=%s)", settings.telegram_chat_id)
     offset = 0
-
-    # Use the configured chat_id as the user_id for the agent loop
-    user_id = str(settings.telegram_chat_id)
 
     while True:
         updates = _get_updates(offset)
@@ -89,15 +71,12 @@ def run_polling_loop():
 
             logger.info("Received message: %s", text[:100])
             try:
-                reply = handle_message(user_id, text)
+                reply = handle_message(text)
             except Exception as exc:
                 logger.error("chat_handler error: %s", exc)
                 reply = "Sorry, something went wrong processing your request."
 
-            send_message(reply, parse_mode="")
-
-        # Check for due reminders every cycle
-        _check_reminders()
+            send_message(reply)
 
         if not updates:
             time.sleep(_POLL_INTERVAL)
