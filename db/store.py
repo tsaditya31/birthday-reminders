@@ -115,6 +115,25 @@ def init_db():
                     created_at  TEXT
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id          SERIAL PRIMARY KEY,
+                    user_id     TEXT NOT NULL,
+                    role        TEXT NOT NULL,
+                    content     TEXT NOT NULL,
+                    created_at  TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id              SERIAL PRIMARY KEY,
+                    user_id         TEXT NOT NULL,
+                    reminder_text   TEXT NOT NULL,
+                    due_at          TIMESTAMPTZ NOT NULL,
+                    sent            BOOLEAN DEFAULT FALSE,
+                    created_at      TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
 
             # Migrations for existing tables
             _add_column_if_missing(cur, "birthdays", "dismissed", "BOOLEAN DEFAULT FALSE")
@@ -549,3 +568,175 @@ def get_learned_queries() -> list[str]:
         with conn.cursor() as cur:
             cur.execute("SELECT query FROM learned_queries ORDER BY created_at")
             return [r["query"] for r in cur.fetchall()]
+
+
+# ── Chat message helpers ───────────────────────────────────────────────────
+
+def insert_chat_message(user_id: str, role: str, content: str):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO chat_messages (user_id, role, content) VALUES (%s, %s, %s)",
+                (user_id, role, content),
+            )
+
+
+def get_recent_chat_messages(user_id: str, limit: int = 20) -> list[dict]:
+    """Return last N messages oldest-first."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT role, content FROM chat_messages
+                   WHERE user_id = %s
+                   ORDER BY created_at DESC LIMIT %s""",
+                (user_id, limit),
+            )
+            rows = cur.fetchall()
+    return list(reversed(rows))
+
+
+# ── Pantry helpers (shared DB with pantry-pilot) ──────────────────────────
+
+def add_manual_pantry_item(
+    user_id: int, item_name: str, normalized_name: str,
+    location: str, category: Optional[str] = None,
+):
+    """Add a pantry item manually (no photo snapshot).
+
+    Creates a synthetic snapshot so the item fits the existing schema.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Create a synthetic snapshot for manual additions
+            cur.execute(
+                """INSERT INTO pantry_snapshots (user_id, snapshot_type, telegram_file_id, raw_extraction)
+                   VALUES (%s, %s, %s, %s) RETURNING id""",
+                (user_id, location, "manual", '{"source": "manual"}'),
+            )
+            snapshot_id = cur.fetchone()["id"]
+            cur.execute(
+                """INSERT INTO pantry_items
+                    (snapshot_id, user_id, item_name, normalized_name,
+                     category, estimated_qty, condition, is_current)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)""",
+                (snapshot_id, user_id, item_name, normalized_name, category, "unknown", "good"),
+            )
+
+
+def remove_pantry_item(user_id: int, normalized_name: str) -> int:
+    """Mark matching current pantry items as not current. Returns count removed."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE pantry_items SET is_current = FALSE
+                   WHERE user_id = %s AND normalized_name = %s AND is_current = TRUE""",
+                (user_id, normalized_name),
+            )
+            return cur.rowcount
+
+
+def get_current_pantry_items(user_id: int) -> list[dict]:
+    """Get current pantry/fridge/freezer items (shared pantry-pilot tables)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT pi.item_name, pi.normalized_name, pi.category,
+                          pi.estimated_qty, pi.condition,
+                          ps.snapshot_type, ps.created_at
+                   FROM pantry_items pi
+                   JOIN pantry_snapshots ps ON ps.id = pi.snapshot_id
+                   WHERE pi.user_id = %s AND pi.is_current = TRUE
+                   ORDER BY ps.snapshot_type, pi.item_name""",
+                (user_id,),
+            )
+            return cur.fetchall()
+
+
+def get_recent_purchases(user_id: int, days: int = 30) -> list[dict]:
+    """Get recent purchases from receipt data (shared pantry-pilot tables)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT ri.item_name, ri.normalized_name, ri.category,
+                          ri.quantity, ri.unit, ri.price,
+                          r.store_name, r.purchase_date
+                   FROM receipt_items ri
+                   JOIN receipts r ON r.id = ri.receipt_id
+                   WHERE ri.user_id = %s
+                     AND r.purchase_date >= CURRENT_DATE - make_interval(days => %s)
+                   ORDER BY r.purchase_date DESC, ri.item_name""",
+                (user_id, days),
+            )
+            return cur.fetchall()
+
+
+def get_purchase_history(user_id: int, days: int = 90) -> list[dict]:
+    """Get purchase history grouped by item with stats (shared pantry-pilot tables)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT ri.normalized_name,
+                          COUNT(*) as purchase_count,
+                          MAX(r.purchase_date) as last_purchased,
+                          MIN(r.purchase_date) as first_purchased,
+                          ri.category
+                   FROM receipt_items ri
+                   JOIN receipts r ON r.id = ri.receipt_id
+                   WHERE ri.user_id = %s
+                     AND r.purchase_date >= CURRENT_DATE - make_interval(days => %s)
+                   GROUP BY ri.normalized_name, ri.category
+                   ORDER BY purchase_count DESC""",
+                (user_id, days),
+            )
+            return cur.fetchall()
+
+
+# ── Reminder helpers ─────────────────────────────────────────────────────
+
+def insert_reminder(user_id: str, reminder_text: str, due_at: str):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO reminders (user_id, reminder_text, due_at) VALUES (%s, %s, %s)",
+                (user_id, reminder_text, due_at),
+            )
+
+
+def get_due_reminders() -> list[dict]:
+    """Return unsent reminders where due_at <= NOW()."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM reminders WHERE sent = FALSE AND due_at <= NOW()"
+            )
+            return cur.fetchall()
+
+
+def mark_reminder_sent(reminder_id: int):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE reminders SET sent = TRUE WHERE id = %s", (reminder_id,))
+
+
+def get_pending_reminders(user_id: str) -> list[dict]:
+    """Return future unsent reminders for this user."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, reminder_text, due_at FROM reminders
+                   WHERE user_id = %s AND sent = FALSE
+                   ORDER BY due_at""",
+                (user_id,),
+            )
+            return cur.fetchall()
+
+
+def get_user_timezone(user_id: int) -> str:
+    """Get user's timezone from the users table. Falls back to 'America/Los_Angeles'."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT timezone FROM users WHERE id = %s", (user_id,))
+            row = cur.fetchone()
+            if row and row.get("timezone"):
+                return row["timezone"]
+    return "America/Los_Angeles"
