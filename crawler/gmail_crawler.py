@@ -294,3 +294,31 @@ def crawl_action_emails(days_back: int = 3, max_per_query: int = 50) -> list[Raw
 
     logger.info("Action crawl complete. %d new emails fetched.", len(results))
     return results
+
+
+def search_emails(query: str, max_results: int = 5) -> list[RawEmail]:
+    """
+    Search Gmail with an arbitrary query and return matching emails.
+    Unlike crawl functions, this does NOT mark emails as processed
+    and does NOT skip already-processed emails — it's a read-only lookup.
+    """
+    service = _build_service()
+    results: list[RawEmail] = []
+
+    logger.info("Searching Gmail: %s", query)
+    try:
+        request = service.users().messages().list(
+            userId="me", q=query, maxResults=max_results,
+        )
+        response = _retry_api_call(request.execute, f"search '{query}'")
+    except Exception as exc:
+        logger.error("Gmail search failed for '%s': %s", query, exc)
+        return results
+
+    for msg_ref in response.get("messages", []):
+        raw = _fetch_message(service, msg_ref["id"])
+        if raw:
+            results.append(raw)
+
+    logger.info("Search returned %d emails.", len(results))
+    return results

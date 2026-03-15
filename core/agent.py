@@ -129,6 +129,18 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "search_email",
+        "description": "Search Gmail for emails matching a query and return their full contents (subject, sender, date, body). Use this to read specific emails the user asks about.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Gmail search query (e.g. 'subject:Clara birthday', 'from:john@example.com')."},
+                "max_results": {"type": "integer", "description": "Max emails to return. Default 5.", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "get_calendar_events",
         "description": "Read events from Google Calendar within a date range.",
         "input_schema": {

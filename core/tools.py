@@ -243,6 +243,29 @@ def tool_crawl_emails_now(days_back: int = 60) -> dict:
     return {"emails_found": len(raw_emails), "items_extracted": saved}
 
 
+def tool_search_email(query: str, max_results: int = 5) -> dict:
+    """Search Gmail for emails matching a query and return their contents."""
+    from crawler.gmail_crawler import search_emails
+
+    raw_emails = search_emails(query=query, max_results=max_results)
+    if not raw_emails:
+        return {"emails": [], "count": 0, "message": f"No emails found for '{query}'."}
+
+    results = []
+    for e in raw_emails:
+        # Truncate body to keep tool result manageable for Claude
+        body = e.full_body[:3000] if e.full_body else e.snippet
+        results.append({
+            "id": e.id,
+            "subject": e.subject,
+            "sender": e.sender,
+            "date": e.date,
+            "snippet": e.snippet,
+            "body": body,
+        })
+    return {"emails": results, "count": len(results)}
+
+
 def tool_get_calendar_events(start_date: str | None = None, end_date: str | None = None, query: str | None = None) -> dict:
     """Read events from Google Calendar."""
     from core.calendar_helper import list_events
@@ -318,6 +341,7 @@ TOOL_HANDLERS = {
     "add_preference": tool_add_preference,
     "submit_feedback": tool_submit_feedback,
     "crawl_emails_now": tool_crawl_emails_now,
+    "search_email": tool_search_email,
     "get_calendar_events": tool_get_calendar_events,
     "suggest_calendar_event": tool_suggest_calendar_event,
 }
