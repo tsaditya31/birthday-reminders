@@ -184,9 +184,15 @@ def _handle_calendar_confirmation(text: str) -> str | None:
         return None
     lower = text.lower().strip()
     if lower in ("yes", "y", "confirm", "go ahead", "do it", "ok", "sure", "yep", "yeah"):
-        result = confirm_calendar_event()
+        try:
+            result = confirm_calendar_event()
+        except Exception as exc:
+            logger.error("Calendar confirmation failed: %s", exc)
+            clear_pending_calendar_event()
+            return f"Failed to create the event: {exc}"
         if result.get("success"):
             return f"Done! I've created <b>{result['summary']}</b> on your calendar."
+        clear_pending_calendar_event()
         return f"Failed to create the event: {result.get('error', 'unknown error')}"
     if lower in ("no", "n", "cancel", "nah", "nope", "never mind"):
         clear_pending_calendar_event()

@@ -42,7 +42,11 @@ def list_events(start_date: str, end_date: str, query: Optional[str] = None) -> 
     Query Google Calendar events between start_date and end_date (YYYY-MM-DD).
     Returns a list of simplified event dicts.
     """
-    service = _build_calendar_service()
+    try:
+        service = _build_calendar_service()
+    except Exception as exc:
+        logger.error("Calendar service unavailable: %s", exc)
+        return []
     time_min = f"{start_date}T00:00:00Z"
     time_max = f"{end_date}T23:59:59Z"
 
@@ -83,7 +87,11 @@ def create_event(
     all_day: bool = False,
 ) -> dict:
     """Create a Google Calendar event. Returns success status and event details."""
-    service = _build_calendar_service()
+    try:
+        service = _build_calendar_service()
+    except Exception as exc:
+        logger.error("Calendar service unavailable: %s", exc)
+        return {"success": False, "error": str(exc)}
 
     if all_day or not time_str:
         event_body = {
