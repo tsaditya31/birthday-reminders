@@ -8,15 +8,12 @@ from datetime import date, timedelta
 from html import escape
 from typing import Optional
 
-from crawler.gmail_crawler import crawl_action_emails
-from core.action_extractor import extract_action_items
 from core.reminder_engine import get_birthday_alerts
 from db.store import (
     get_upcoming_action_items,
     get_unnotified_urgent,
     mark_action_notified,
     mark_notified,
-    upsert_action_item,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,42 +79,18 @@ def _should_notify(row: dict) -> Optional[str]:
 
 def build_daily_digest(dry_run: bool = False) -> Optional[str]:
     """
-    Full pipeline: crawl → extract → store → query → build HTML digest.
+    Query DB → apply priority rules → build HTML digest.
     Returns the digest string, or None if nothing is actionable today.
-    Priority-based grouping: urgent, high, normal/low.
+    Crawling is now on-demand via the agent's crawl_emails_now tool.
     """
     today = date.today()
 
-    # ── Step 1: Crawl and extract new action emails ──────────────────────────
-    logger.info("Crawling action emails…")
-    raw_emails = crawl_action_emails(days_back=14)
-    if raw_emails:
-        logger.info("Extracting action items from %d emails…", len(raw_emails))
-        action_items = extract_action_items(raw_emails)
-        for item in action_items:
-            upsert_action_item(
-                type=item.type,
-                title=item.title,
-                email_message_id=item.email_message_id,
-                description=item.description,
-                due_date=item.due_date,
-                due_time=item.due_time,
-                email_subject=item.email_subject,
-                email_from=item.email_from,
-                priority=item.priority,
-                category=item.category,
-                confidence=item.confidence,
-                source_snippet=item.source_snippet,
-            )
-    else:
-        logger.info("No new action emails found.")
-
-    # ── Step 2: Query DB for items to notify ─────────────────────────────────
+    # ── Step 1: Query DB for items to notify ─────────────────────────────────
     # Widen to 3 days for early notifications
     upcoming = get_upcoming_action_items(days_ahead=3)
     urgent_items = get_unnotified_urgent()
 
-    # ── Step 3: Apply priority-based timing rules ─────────────────────────────
+    # ── Step 2: Apply priority-based timing rules ─────────────────────────────
     urgent_to_send: list = []
     high_to_send: list = []
     normal_to_send: list = []
@@ -141,15 +114,15 @@ def build_daily_digest(dry_run: bool = False) -> Optional[str]:
             urgent_to_send.append(row)
             items_to_mark.append((row["id"], "day"))
 
-    # ── Step 4: Birthday alerts ───────────────────────────────────────────────
+    # ── Step 3: Birthday alerts ───────────────────────────────────────────────
     birthday_alerts = get_birthday_alerts()  # list of (msg, bid, flag)
 
-    # ── Step 5: Bail if nothing to send ──────────────────────────────────────
+    # ── Step 4: Bail if nothing to send ──────────────────────────────────────
     if not urgent_to_send and not high_to_send and not normal_to_send and not birthday_alerts:
         logger.info("Nothing actionable today.")
         return None
 
-    # ── Step 6: Build HTML digest (priority-based) ────────────────────────────
+    # ── Step 5: Build HTML digest (priority-based) ────────────────────────────
     day_label = today.strftime("%a %b %-d")
     lines = [f"📅 <b>Daily Digest — {day_label}</b>"]
 
@@ -183,7 +156,7 @@ def build_daily_digest(dry_run: bool = False) -> Optional[str]:
 
     digest = "\n".join(lines)
 
-    # ── Step 7: Mark notifications (skip in dry_run) ──────────────────────────
+    # ── Step 6: Mark notifications (skip in dry_run) ──────────────────────────
     if not dry_run:
         for item_id, flag in items_to_mark:
             mark_action_notified(item_id, flag)

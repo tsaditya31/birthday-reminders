@@ -9,7 +9,7 @@ import time
 import httpx
 
 from config import settings
-from core.chat_handler import handle_message
+from core.agent import handle_message
 from notifier.telegram_notifier import send_message
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ def run_polling_loop():
             try:
                 reply = handle_message(text)
             except Exception as exc:
-                logger.error("chat_handler error: %s", exc)
+                logger.error("agent error: %s", exc)
                 reply = "Sorry, something went wrong processing your request."
 
             send_message(reply)

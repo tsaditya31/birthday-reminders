@@ -14,6 +14,9 @@ class Settings(BaseSettings):
 
     database_url: str
 
+    # Google Calendar (reuses gmail_client_id/secret)
+    google_calendar_refresh_token: str = ""
+
     # Extraction settings
     birthday_confidence_threshold: float = 0.6
     action_confidence_threshold: float = 0.65
