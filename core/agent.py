@@ -17,6 +17,10 @@ from core.tools import (
     execute_tool,
     get_pending_calendar_event,
 )
+from db.store import (
+    answer_clarification,
+    get_pending_clarification,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +216,119 @@ def _handle_calendar_confirmation(text: str) -> str | None:
     return None
 
 
+def _handle_clarification_reply(text: str) -> str | None:
+    """Check if the user's message is a reply to a pending clarification."""
+    pending = get_pending_clarification()
+    if not pending:
+        return None
+
+    # Use Claude to determine if this is a reply to the clarification or a new command
+    try:
+        classify = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            system=(
+                "You classify user messages. A clarification question was asked about an action item. "
+                "Determine if the user's message is a REPLY to that question or a NEW/UNRELATED command. "
+                "Respond with exactly 'REPLY' or 'NEW'."
+            ),
+            messages=[
+                {"role": "user", "content": (
+                    f"Clarification question: {pending['question_text']}\n"
+                    f"Item: {pending.get('item_title', 'unknown')}\n\n"
+                    f"User's message: {text}"
+                )},
+            ],
+        )
+        classification = classify.content[0].text.strip().upper()
+    except Exception:
+        logger.exception("Clarification classification failed")
+        return None
+
+    if classification != "REPLY":
+        return None
+
+    # Process the reply based on question type
+    question_type = pending["question_type"]
+    action_item_id = pending["action_item_id"]
+
+    if question_type == "calendar_suggestion":
+        lower = text.lower().strip()
+        if lower in ("yes", "y", "sure", "ok", "yeah", "yep", "go ahead", "do it"):
+            # Create calendar event from the action item
+            from core.calendar_helper import create_event
+            try:
+                result = create_event(
+                    summary=pending.get("item_title", "Event"),
+                    date_str=pending.get("due_date", ""),
+                    time_str=None,
+                    description=pending.get("item_description"),
+                )
+                answer_clarification(pending["id"], text)
+                if result.get("success"):
+                    return f"Done! I've added <b>{result['summary']}</b> to your calendar."
+                return f"Failed to create the event: {result.get('error', 'unknown error')}"
+            except Exception as exc:
+                logger.error("Calendar creation failed: %s", exc)
+                answer_clarification(pending["id"], text)
+                return f"Failed to create the event: {exc}"
+        else:
+            answer_clarification(pending["id"], text)
+            return "No problem, I won't add it to your calendar."
+
+    # For missing_date or low_confidence: use Claude to process the answer
+    try:
+        process = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=300,
+            system=(
+                "You are processing a user's answer to a clarification about an action item. "
+                "Extract any new information (due date, corrected details, dismissal). "
+                "Respond with a JSON object: "
+                '{"action": "update_date", "due_date": "YYYY-MM-DD"} or '
+                '{"action": "dismiss"} or '
+                '{"action": "note", "note": "what the user said"}. '
+                "Return ONLY the JSON."
+            ),
+            messages=[
+                {"role": "user", "content": (
+                    f"Item: {pending.get('item_title', 'unknown')}\n"
+                    f"Question: {pending['question_text']}\n"
+                    f"User's answer: {text}"
+                )},
+            ],
+        )
+        import json
+        from core.utils import strip_json_markdown
+        raw = strip_json_markdown(process.content[0].text.strip())
+        result = json.loads(raw)
+    except Exception:
+        logger.exception("Clarification processing failed")
+        answer_clarification(pending["id"], text)
+        return "Got it, I've noted your response. Thanks!"
+
+    answer_clarification(pending["id"], text)
+
+    if result.get("action") == "update_date" and result.get("due_date"):
+        from datetime import datetime as dt, timezone as tz
+        from db.store import get_db
+        now = dt.now(tz.utc).isoformat()
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE action_items SET due_date = %s, updated_at = %s WHERE id = %s",
+                    (result["due_date"], now, action_item_id),
+                )
+        return f"Updated! I've set the due date to <b>{result['due_date']}</b>."
+
+    if result.get("action") == "dismiss":
+        from db.store import dismiss_action_item
+        dismiss_action_item(action_item_id)
+        return "Got it, I've dismissed that item."
+
+    return "Got it, I've noted your response. Thanks!"
+
+
 def handle_message(text: str) -> str:
     """
     Agent loop: send user message + tools to Claude, execute tool calls,
@@ -221,6 +338,11 @@ def handle_message(text: str) -> str:
     cal_reply = _handle_calendar_confirmation(text)
     if cal_reply:
         return cal_reply
+
+    # Check for pending clarification reply
+    clar_reply = _handle_clarification_reply(text)
+    if clar_reply:
+        return clar_reply
 
     # Build messages from history + new user message
     messages = list(_history) + [{"role": "user", "content": text}]

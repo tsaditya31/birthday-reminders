@@ -1,6 +1,2 @@
-[services.reminder]
-startCommand = "python main.py remind"
-cronSchedule = "0 8 * * *"
-
 [services.bot]
 startCommand = "python main.py bot"

@@ -25,10 +25,18 @@ logger = logging.getLogger(__name__)
 
 
 def cmd_bot():
-    """Start the interactive Telegram chatbot (tool-use agent loop)."""
+    """Start the interactive Telegram chatbot (tool-use agent loop) with background heartbeat."""
     logger.info("=== Starting Telegram bot ===")
     init_db()
-    run_polling_loop()
+
+    from core.heartbeat import Heartbeat
+
+    heartbeat = Heartbeat()
+    heartbeat.start()
+    try:
+        run_polling_loop()
+    finally:
+        heartbeat.stop()
 
 
 def cmd_remind(dry_run: bool = False):

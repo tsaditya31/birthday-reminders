@@ -38,5 +38,12 @@ class Settings(BaseSettings):
     # Bot settings
     bot_poll_interval: float = 2.0
 
+    # Heartbeat settings
+    heartbeat_interval_hours: float = 4.0
+    proactive_alerts_enabled: bool = True
+    max_clarifications_per_tick: int = 2
+    digest_hour_start: int = 6
+    digest_hour_end: int = 10
+
 
 settings = Settings()

@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 import psycopg2
@@ -113,6 +113,35 @@ def init_db():
                     query       TEXT NOT NULL UNIQUE,
                     source      TEXT,
                     created_at  TEXT
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS proactive_messages (
+                    id              SERIAL PRIMARY KEY,
+                    action_item_id  INTEGER,
+                    birthday_id     INTEGER,
+                    message_type    TEXT NOT NULL,
+                    sent_at         TEXT NOT NULL
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pending_clarifications (
+                    id              SERIAL PRIMARY KEY,
+                    action_item_id  INTEGER,
+                    question_type   TEXT NOT NULL,
+                    question_text   TEXT NOT NULL,
+                    answered        BOOLEAN DEFAULT FALSE,
+                    answer_text     TEXT,
+                    created_at      TEXT NOT NULL,
+                    answered_at     TEXT
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS heartbeat_state (
+                    key         TEXT PRIMARY KEY,
+                    value       TEXT NOT NULL,
+                    updated_at  TEXT NOT NULL
                 )
             """)
 
@@ -549,3 +578,204 @@ def get_learned_queries() -> list[str]:
         with conn.cursor() as cur:
             cur.execute("SELECT query FROM learned_queries ORDER BY created_at")
             return [r["query"] for r in cur.fetchall()]
+
+
+# ── Proactive message helpers ────────────────────────────────────────────────
+
+def is_proactive_sent(
+    message_type: str,
+    action_item_id: Optional[int] = None,
+    birthday_id: Optional[int] = None,
+) -> bool:
+    """Check if a proactive message of this type was already sent for this item."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if action_item_id:
+                cur.execute(
+                    "SELECT 1 FROM proactive_messages WHERE message_type = %s AND action_item_id = %s",
+                    (message_type, action_item_id),
+                )
+            elif birthday_id:
+                cur.execute(
+                    "SELECT 1 FROM proactive_messages WHERE message_type = %s AND birthday_id = %s",
+                    (message_type, birthday_id),
+                )
+            else:
+                return False
+            return cur.fetchone() is not None
+
+
+def mark_proactive_sent(
+    message_type: str,
+    action_item_id: Optional[int] = None,
+    birthday_id: Optional[int] = None,
+):
+    """Record that a proactive message was sent."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO proactive_messages (action_item_id, birthday_id, message_type, sent_at)
+                   VALUES (%s, %s, %s, %s)""",
+                (action_item_id, birthday_id, message_type, now),
+            )
+
+
+# ── Heartbeat state helpers ──────────────────────────────────────────────────
+
+def get_heartbeat_state(key: str) -> Optional[str]:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM heartbeat_state WHERE key = %s", (key,))
+            row = cur.fetchone()
+            return row["value"] if row else None
+
+
+def set_heartbeat_state(key: str, value: str):
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO heartbeat_state (key, value, updated_at)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (key)
+                   DO UPDATE SET value = %s, updated_at = %s""",
+                (key, value, now, value, now),
+            )
+
+
+# ── Pending clarification helpers ────────────────────────────────────────────
+
+def insert_pending_clarification(
+    action_item_id: int,
+    question_type: str,
+    question_text: str,
+) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO pending_clarifications
+                    (action_item_id, question_type, question_text, created_at)
+                   VALUES (%s, %s, %s, %s) RETURNING id""",
+                (action_item_id, question_type, question_text, now),
+            )
+            return cur.fetchone()["id"]
+
+
+def get_pending_clarification() -> Optional[dict]:
+    """Get the most recent unanswered clarification (< 24h old)."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT pc.*, ai.title as item_title, ai.type as item_type,
+                          ai.due_date, ai.description as item_description
+                   FROM pending_clarifications pc
+                   LEFT JOIN action_items ai ON pc.action_item_id = ai.id
+                   WHERE pc.answered = FALSE AND pc.created_at >= %s
+                   ORDER BY pc.created_at DESC LIMIT 1""",
+                (cutoff,),
+            )
+            return cur.fetchone()
+
+
+def answer_clarification(clarification_id: int, answer_text: str):
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE pending_clarifications
+                   SET answered = TRUE, answer_text = %s, answered_at = %s
+                   WHERE id = %s""",
+                (answer_text, now, clarification_id),
+            )
+
+
+# ── Queries for heartbeat tasks ──────────────────────────────────────────────
+
+def get_new_urgent_items(since_hours: int = 4) -> list[dict]:
+    """Return urgent/high priority items created in the last N hours, not yet proactively sent."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT ai.* FROM action_items ai
+                   WHERE ai.priority IN ('urgent', 'high')
+                     AND ai.dismissed = FALSE
+                     AND ai.created_at >= %s
+                     AND NOT EXISTS (
+                         SELECT 1 FROM proactive_messages pm
+                         WHERE pm.action_item_id = ai.id AND pm.message_type = 'urgent_alert'
+                     )""",
+                (cutoff,),
+            )
+            return cur.fetchall()
+
+
+def get_items_due_soon(hours: int = 24) -> list[dict]:
+    """Return items due within the next N hours, not yet proactively alerted."""
+    from datetime import timedelta
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT ai.* FROM action_items ai
+                   WHERE ai.due_date IS NOT NULL
+                     AND ai.due_date >= %s
+                     AND ai.due_date <= %s
+                     AND ai.dismissed = FALSE
+                     AND NOT EXISTS (
+                         SELECT 1 FROM proactive_messages pm
+                         WHERE pm.action_item_id = ai.id AND pm.message_type = 'due_soon'
+                     )""",
+                (today.isoformat(), tomorrow.isoformat()),
+            )
+            return cur.fetchall()
+
+
+def get_ambiguous_items() -> list[dict]:
+    """Return items with low confidence or missing due dates, not yet clarified."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT ai.* FROM action_items ai
+                   WHERE ai.dismissed = FALSE
+                     AND (
+                         (ai.confidence IS NOT NULL AND ai.confidence >= 0.4 AND ai.confidence < 0.65)
+                         OR ai.due_date IS NULL
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM pending_clarifications pc
+                         WHERE pc.action_item_id = ai.id
+                     )
+                   ORDER BY ai.created_at DESC
+                   LIMIT 5""",
+            )
+            return cur.fetchall()
+
+
+def get_calendar_suggestable_items() -> list[dict]:
+    """Return appointment/meeting/booking items with dates but no calendar suggestion sent."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT ai.* FROM action_items ai
+                   WHERE ai.type IN ('appointment', 'meeting', 'booking')
+                     AND ai.due_date IS NOT NULL
+                     AND ai.dismissed = FALSE
+                     AND NOT EXISTS (
+                         SELECT 1 FROM proactive_messages pm
+                         WHERE pm.action_item_id = ai.id AND pm.message_type = 'calendar_suggestion'
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM pending_clarifications pc
+                         WHERE pc.action_item_id = ai.id AND pc.question_type = 'calendar_suggestion'
+                     )
+                   ORDER BY ai.due_date ASC
+                   LIMIT 1""",
+            )
+            return cur.fetchall()
