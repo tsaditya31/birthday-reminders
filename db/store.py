@@ -742,6 +742,8 @@ def get_items_due_soon(hours: int = 24) -> list[dict]:
 
 def get_ambiguous_items() -> list[dict]:
     """Return items with low confidence or missing due dates, not yet clarified."""
+    from core.utils import local_today
+    today_str = local_today().isoformat()
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -751,24 +753,29 @@ def get_ambiguous_items() -> list[dict]:
                          (ai.confidence IS NOT NULL AND ai.confidence >= 0.4 AND ai.confidence < 0.65)
                          OR ai.due_date IS NULL
                      )
+                     AND (ai.due_date IS NULL OR ai.due_date >= %s)
                      AND NOT EXISTS (
                          SELECT 1 FROM pending_clarifications pc
                          WHERE pc.action_item_id = ai.id
                      )
                    ORDER BY ai.created_at DESC
                    LIMIT 5""",
+                (today_str,),
             )
             return cur.fetchall()
 
 
 def get_calendar_suggestable_items() -> list[dict]:
-    """Return appointment/meeting/booking items with dates but no calendar suggestion sent."""
+    """Return appointment/meeting/booking items with future dates but no calendar suggestion sent."""
+    from core.utils import local_today
+    today_str = local_today().isoformat()
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT ai.* FROM action_items ai
                    WHERE ai.type IN ('appointment', 'meeting', 'booking')
                      AND ai.due_date IS NOT NULL
+                     AND ai.due_date >= %s
                      AND ai.dismissed = FALSE
                      AND NOT EXISTS (
                          SELECT 1 FROM proactive_messages pm
@@ -780,5 +787,6 @@ def get_calendar_suggestable_items() -> list[dict]:
                      )
                    ORDER BY ai.due_date ASC
                    LIMIT 1""",
+                (today_str,),
             )
             return cur.fetchall()
