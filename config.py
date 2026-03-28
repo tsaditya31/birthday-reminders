@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # Bot settings
     bot_poll_interval: float = 2.0
 
+    # Timezone
+    user_timezone: str = "America/New_York"
+
     # Heartbeat settings
     heartbeat_interval_hours: float = 4.0
     proactive_alerts_enabled: bool = True

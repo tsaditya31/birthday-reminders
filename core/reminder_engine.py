@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 
+from core.utils import local_today
+
 from db.store import get_upcoming_birthdays, mark_notified, reset_annual_flags
 from core.amazon_helper import build_amazon_message
 from notifier.telegram_notifier import send_message
@@ -19,7 +21,7 @@ BirthdayAlert = tuple[str, int, str]
 
 
 def _days_until(month: int, day: int) -> int:
-    today = date.today()
+    today = local_today()
     this_year = today.year
     target = date(this_year, month, day)
     if target < today:
@@ -31,7 +33,7 @@ def _compute_turning_age(birth_year: int | None, birth_month: int, birth_day: in
     """Return the age this person is turning on their next upcoming birthday."""
     if birth_year is None:
         return None
-    today = date.today()
+    today = local_today()
     # Find the next occurrence of this birthday
     try:
         this_year_bday = date(today.year, birth_month, birth_day)
@@ -61,7 +63,7 @@ def get_birthday_alerts() -> list[BirthdayAlert]:
     Collect birthday alerts that are due to be sent today.
     Returns a list of (message_str, birthday_id, flag) tuples — does NOT send or mark.
     """
-    today = date.today()
+    today = local_today()
 
     if today.month == 1 and today.day == 1:
         logger.info("New year detected — resetting notification flags.")

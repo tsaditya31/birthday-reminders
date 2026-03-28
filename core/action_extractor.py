@@ -11,7 +11,7 @@ from typing import Optional
 import anthropic
 
 from config import settings
-from core.utils import strip_json_markdown
+from core.utils import local_today, strip_json_markdown
 from crawler.gmail_crawler import RawEmail
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ def _call_claude(batch: list[RawEmail]) -> list[dict]:
     feedback_block = get_feedback_examples_block()
     prompt = USER_PROMPT_TEMPLATE.format(
         n=len(batch),
-        today=date.today().isoformat(),
+        today=local_today().isoformat(),
         emails=emails_text,
         feedback_block=feedback_block,
     )

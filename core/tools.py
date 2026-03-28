@@ -7,6 +7,8 @@ import logging
 from datetime import date, timedelta
 from html import escape
 
+from core.utils import local_today
+
 from config import settings
 from db.store import (
     add_learned_query,
@@ -31,7 +33,7 @@ _pending_calendar_event: dict | None = None
 def tool_get_upcoming_birthdays(days_ahead: int = 30) -> dict:
     """Query birthdays within the next N days."""
     items = get_upcoming_birthdays(days_ahead=days_ahead)
-    today = date.today()
+    today = local_today()
     results = []
     for b in items:
         try:
@@ -61,7 +63,7 @@ def tool_get_upcoming_birthdays(days_ahead: int = 30) -> dict:
 
 def tool_get_action_items(start_date: str | None = None, end_date: str | None = None) -> dict:
     """Query action items within a date range."""
-    today = date.today()
+    today = local_today()
     if not start_date:
         start_date = today.isoformat()
     if not end_date:
@@ -269,7 +271,7 @@ def tool_search_email(query: str, max_results: int = 5) -> dict:
 def tool_get_calendar_events(start_date: str | None = None, end_date: str | None = None, query: str | None = None) -> dict:
     """Read events from Google Calendar."""
     from core.calendar_helper import list_events
-    today = date.today()
+    today = local_today()
     if not start_date:
         start_date = today.isoformat()
     if not end_date:

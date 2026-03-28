@@ -8,6 +8,8 @@ from datetime import date, timedelta
 from html import escape
 from typing import Optional
 
+from core.utils import local_today
+
 from core.reminder_engine import get_birthday_alerts
 from db.store import (
     get_upcoming_action_items,
@@ -21,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 def _days_until_date(due_date_str: str) -> int:
     """Days from today to the given YYYY-MM-DD date string."""
-    today = date.today()
+    today = local_today()
     due = date.fromisoformat(due_date_str)
     return (due - today).days
 
@@ -83,7 +85,7 @@ def build_daily_digest(dry_run: bool = False) -> Optional[str]:
     Returns the digest string, or None if nothing is actionable today.
     Crawling is now on-demand via the agent's crawl_emails_now tool.
     """
-    today = date.today()
+    today = local_today()
 
     # ── Step 1: Query DB for items to notify ─────────────────────────────────
     # Widen to 3 days for early notifications

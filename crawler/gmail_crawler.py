@@ -9,6 +9,8 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import date, timedelta
+
+from core.utils import local_today
 from typing import Optional
 
 from google.auth.transport.requests import Request
@@ -122,12 +124,12 @@ def _build_service():
 
 
 def _after_date() -> str:
-    cutoff = date.today() - timedelta(days=BIRTHDAY_LOOKBACK_DAYS)
+    cutoff = local_today() - timedelta(days=BIRTHDAY_LOOKBACK_DAYS)
     return cutoff.strftime("%Y/%m/%d")
 
 
 def _after_date_days_back(days_back: int) -> str:
-    cutoff = date.today() - timedelta(days=days_back)
+    cutoff = local_today() - timedelta(days=days_back)
     return cutoff.strftime("%Y/%m/%d")
 
 

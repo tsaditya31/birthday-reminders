@@ -6,7 +6,6 @@ Claude receives tool definitions and decides what to call.
 import json
 import logging
 from collections import deque
-from datetime import date
 
 import anthropic
 
@@ -174,9 +173,11 @@ TOOL_DEFINITIONS = [
     },
 ]
 
-SYSTEM_PROMPT = f"""\
+def _build_system_prompt() -> str:
+    from core.utils import local_today
+    return f"""\
 You are a personal assistant bot for managing birthdays, action items, and calendar events.
-Today's date is {date.today().isoformat()}.
+Today's date is {local_today().isoformat()}.
 
 You help the user by calling the available tools to query their data and take actions.
 You can call multiple tools if needed, and use results to give helpful responses.
@@ -352,7 +353,7 @@ def handle_message(text: str) -> str:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
-            system=SYSTEM_PROMPT,
+            system=_build_system_prompt(),
             tools=TOOL_DEFINITIONS,
             messages=messages,
         )

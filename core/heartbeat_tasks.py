@@ -7,6 +7,8 @@ import logging
 from datetime import date, datetime, timezone
 from html import escape
 
+from core.utils import local_now, local_today
+
 import anthropic
 
 from config import settings
@@ -63,7 +65,7 @@ def task_auto_crawl():
             logger.info("Auto-crawl: %d action emails → %d items", len(raw_actions), len(actions))
 
     # Crawl birthday emails once per day
-    today_str = date.today().isoformat()
+    today_str = local_today().isoformat()
     last_birthday_crawl = get_heartbeat_state("last_birthday_crawl_date")
     if last_birthday_crawl != today_str:
         raw_birthdays = crawl_emails(max_per_query=200)
@@ -203,13 +205,12 @@ def task_calendar_suggestions():
 
 def task_daily_digest():
     """Send daily digest if current hour is within digest window and not yet sent today."""
-    now = datetime.now(timezone.utc)
-    # Use a simple hour check (UTC). User can adjust digest_hour in config.
+    now = local_now()
     current_hour = now.hour
     if not (settings.digest_hour_start <= current_hour <= settings.digest_hour_end):
         return
 
-    today_str = date.today().isoformat()
+    today_str = local_today().isoformat()
     last_digest = get_heartbeat_state("last_digest_date")
     if last_digest == today_str:
         return

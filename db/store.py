@@ -226,9 +226,10 @@ def upsert_birthday(
 
 def get_upcoming_birthdays(days_ahead: int = 14) -> list[dict]:
     """Return birthdays whose (month, day) falls within the next `days_ahead` days."""
-    from datetime import date, timedelta
+    from datetime import timedelta
+    from core.utils import local_today
 
-    today = date.today()
+    today = local_today()
     targets = [(today + timedelta(days=i)) for i in range(days_ahead + 1)]
     month_days = set((d.month, d.day) for d in targets)
 
@@ -323,9 +324,10 @@ def upsert_action_item(
 
 def get_upcoming_action_items(days_ahead: int = 3) -> list[dict]:
     """Return action items with due_date within the next days_ahead days."""
-    from datetime import date, timedelta
+    from datetime import timedelta
+    from core.utils import local_today
 
-    today = date.today()
+    today = local_today()
     date_max = today + timedelta(days=days_ahead)
     return get_action_items_between(today.isoformat(), date_max.isoformat())
 
@@ -718,7 +720,8 @@ def get_new_urgent_items(since_hours: int = 4) -> list[dict]:
 def get_items_due_soon(hours: int = 24) -> list[dict]:
     """Return items due within the next N hours, not yet proactively alerted."""
     from datetime import timedelta
-    today = date.today()
+    from core.utils import local_today
+    today = local_today()
     tomorrow = today + timedelta(days=1)
     with get_db() as conn:
         with conn.cursor() as cur:
